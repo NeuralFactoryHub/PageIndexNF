@@ -504,11 +504,15 @@ def calculate_page_offset(pairs):
     return most_common
 
 def add_page_offset_to_toc_json(data, offset):
+    if offset is None:
+        # calculate_page_offset returns None when no page pairs match;
+        # 0 is the identity offset (physical == logical page number).
+        offset = 0
     for i in range(len(data)):
         if data[i].get('page') is not None and isinstance(data[i]['page'], int):
             data[i]['physical_index'] = data[i]['page'] + offset
             del data[i]['page']
-    
+
     return data
 
 

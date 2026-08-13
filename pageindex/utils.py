@@ -635,12 +635,17 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    prompt = f"""You are given a part of a document, your task is to generate a description of the partial document about what are main points covered in the partial document.
+    prompt = f"""You are given one section of a larger document. Write a summary of THIS
+section only. State directly the specific topics, entities, values, and
+details it contains. Do NOT describe the document as a whole, do NOT
+restate its purpose or legal framework, and do NOT begin with phrases
+like "This document is..." or "This section describes...". Start with the
+content itself. Write in the same language as the section text.
 
-    Partial Document Text: {node['text']}
-    
-    Directly return the description, do not include any other text.
-    """
+Section text: {node['text']}
+
+Return only the summary.
+"""
     response = await llm_acompletion(model, prompt)
     return response
 
