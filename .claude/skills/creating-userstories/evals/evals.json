@@ -1,0 +1,49 @@
+{
+  "evals": [
+    {
+      "id": "eval-01",
+      "name": "Simple feature brief",
+      "prompt": "Break this feature brief into user stories:\n\nWe need a password reset flow for our web app. Users should be able to request a password reset via email, receive a secure link, and set a new password. The link should expire after 24 hours. We also need to handle cases where the email doesn't exist in our system.",
+      "expectations": [
+        "Generates at least 3 distinct user stories",
+        "Each story follows As a / I want / So that format",
+        "Each story has at least 2 acceptance criteria in Given/When/Then format",
+        "Covers the happy path (successful reset)",
+        "Covers the error case (email not found)",
+        "Covers the edge case (expired link)",
+        "Includes a priority for each story",
+        "Includes a size estimate for each story",
+        "Stories are ordered by dependency"
+      ]
+    },
+    {
+      "id": "eval-02",
+      "name": "Complex PRD with multiple personas",
+      "prompt": "Create user stories from this PRD:\n\n## Feature: Team Collaboration Dashboard\n\nWe're building a dashboard where team members can share updates, managers can track progress, and executives can see high-level metrics.\n\n### Requirements:\n- Team members post daily standups (text + optional attachment)\n- Managers see their team's updates aggregated by day\n- Executives see department-level summaries with key metrics (velocity, blockers count)\n- All users can comment on updates\n- Managers can flag updates as 'needs attention'\n- Notifications when someone comments on your update or flags it\n- Data exported to CSV for reporting\n\n### Constraints:\n- Must support teams up to 50 members\n- Updates should load within 2 seconds\n- Mobile-responsive design required",
+      "expectations": [
+        "Identifies at least 3 distinct personas (team member, manager, executive)",
+        "Creates a personas table",
+        "Generates at least 8 user stories",
+        "Groups stories logically (by epic or theme)",
+        "Includes non-functional requirements as stories or notes",
+        "Provides a dependency map or implementation order",
+        "Lists assumptions and open questions",
+        "Stories pass INVEST criteria check",
+        "Acceptance criteria are specific and testable"
+      ]
+    },
+    {
+      "id": "eval-03",
+      "name": "Vague one-liner requirement",
+      "prompt": "I need user stories for: 'Add search to our product catalog'",
+      "expectations": [
+        "Asks clarifying questions OR flags assumptions clearly",
+        "Still generates useful stories despite vague input",
+        "Covers basic search (keyword), results display, and empty state",
+        "Considers filtering and sorting as potential stories",
+        "Flags scope questions (autocomplete? fuzzy match? filters?)",
+        "Doesn't over-engineer — keeps stories reasonable for the vague input"
+      ]
+    }
+  ]
+}
