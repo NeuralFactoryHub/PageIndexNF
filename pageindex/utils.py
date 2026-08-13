@@ -11,11 +11,9 @@ import pymupdf
 from io import BytesIO
 from dotenv import load_dotenv
 load_dotenv()
-import logging
-import yaml
-from pathlib import Path
 from types import SimpleNamespace as config
 import re
+from .config import DEFAULT_CONFIG
 
 # litellm is imported inside the functions that use it; eager import is slow
 # and fetches a remote model-cost map.
@@ -42,6 +40,23 @@ def _is_openai_model(model):
 _openai_sync_client = None
 _openai_async_client = None
 
+_logged_models = set()
+
+def _log_provider_once(model, use_openai_sdk):
+    """Log the resolved LLM provider once per distinct model per process.
+
+    The fork routes by model-string prefix (see _is_openai_model); this makes the
+    actual provider visible without enabling LiteLLM verbose logging. Guarded so a
+    tree's hundreds of calls do not spam the log.
+    """
+    if model in _logged_models:
+        return
+    _logged_models.add(model)
+    provider = "openai" if use_openai_sdk else (
+        model.split("/", 1)[0] if model and "/" in model else "openai"
+    )
+    logging.info(f"LLM dispatch: provider={provider!r} model={model!r}")
+
 
 # Misconfiguration: no retry can fix a rejected key or a model that does not
 # exist, and every later call fails the same way. Deliberately not 400, which
@@ -60,6 +75,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
         model = model.removeprefix("litellm/")
         if use_openai_sdk:
             model = model.removeprefix("openai/")
+    _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
     for i in range(max_retries):
@@ -106,6 +122,7 @@ async def llm_acompletion(model, prompt):
         model = model.removeprefix("litellm/")
         if use_openai_sdk:
             model = model.removeprefix("openai/")
+    _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
     for i in range(max_retries):
@@ -635,15 +652,22 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    prompt = f"""You are given one section of a larger document. Write a summary of THIS
-section only. State directly the specific topics, entities, values, and
-details it contains. Do NOT describe the document as a whole, do NOT
-restate its purpose or legal framework, and do NOT begin with phrases
-like "This document is..." or "This section describes...". Start with the
-content itself. Write in the same language as the section text.
+    prompt = f"""You are given one section of a larger document. 
+Your job is to write a summary of THIS section only. 
 
-Section text: {node['text']}
+###HOW TO WRITE IT###
+State directly the specific topics, entities, values, and details it contains.
+Do NOT describe the document as a whole, do NOT restate its purpose or legal framework.
+Begin with: "In this section you will find..."
 
+###OUTPUT LANGUAGE###
+Write in the same language as the section text.
+
+###SECTION TEXT###
+{node['text']}
+###END SECTION TEXT###
+
+###OUTPUT###
 Return only the summary.
 """
     response = await llm_acompletion(model, prompt)
@@ -924,15 +948,8 @@ def page_level_thinning(structure, thinning_threshold_node_num=20, min_pages_for
 
 
 class ConfigLoader:
-    def __init__(self, default_path: str = None):
-        if default_path is None:
-            default_path = Path(__file__).parent / "config.yaml"
-        self._default_dict = self._load_yaml(default_path)
-
-    @staticmethod
-    def _load_yaml(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+    def __init__(self, defaults: dict = None):
+        self._default_dict = dict(DEFAULT_CONFIG if defaults is None else defaults)
 
     def _validate_keys(self, user_dict):
         unknown_keys = set(user_dict) - set(self._default_dict)

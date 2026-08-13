@@ -1,13 +1,17 @@
 """Public library entry point for the fork.
 
-Isolated in its own module (not page_index.py) so the fork stays thin and
-upstream merges do not conflict. `build_tree` is the stable seam the consuming
-backend imports; internals may change upstream without breaking it.
+Isolated in its own module (not page_index.py) so the fork stays thin and upstream merges do
+not conflict. `build_tree` is the stable seam the consuming backend imports.
+
+Routes through ConfigLoader + page_index_main (not page_index's restrictive signature) so ANY
+valid config key — model, summary_model, retrieve_model, toggles — can be passed as a kwarg
+without editing upstream page_index.py.
 """
 from io import BytesIO
 from pathlib import Path
 
-from .page_index import page_index
+from .utils import ConfigLoader
+from .page_index import page_index_main
 
 
 def build_tree(source, **kwargs):
@@ -15,8 +19,9 @@ def build_tree(source, **kwargs):
 
     source: PDF as raw bytes, a filesystem path str, or a pathlib.Path.
             bytes are handled in memory; nothing is written to disk.
-    kwargs: forwarded to `page_index` (model, toc_check_page_num,
-            max_page_num_each_node, if_add_node_summary, ...).
+    kwargs: any valid config key (model, summary_model, retrieve_model,
+            toc_check_page_num, if_add_node_summary, ...). Invalid keys raise
+            ValueError (validated against DEFAULT_CONFIG).
 
     Returns the tree structure (dict). Does NOT persist — the caller decides.
     """
@@ -30,4 +35,5 @@ def build_tree(source, **kwargs):
         raise TypeError(
             f"source must be bytes, str, or Path, got {type(source).__name__}"
         )
-    return page_index(doc, **kwargs)
+    opt = ConfigLoader().load(kwargs or None)
+    return page_index_main(doc, opt)

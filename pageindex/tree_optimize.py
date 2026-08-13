@@ -44,7 +44,7 @@ into one node titled with the union of theirs, which a leaf summary call rewrite
 when the node is large enough to earn one.
 
 merge is deterministic and needs no LLM; expand proposes subsections with the
-model configured as `summary_model` (falling back to `model`) in config.yaml.
+model configured as `summary_model` (falling back to `model`) in config.py.
 
 Usage:
     python3 -m pageindex.tree_optimize --pdf doc.pdf --structure tree.json --plan
@@ -843,7 +843,7 @@ async def main():
     parser.add_argument("--pdf", required=True, help="source document")
     parser.add_argument("--structure", required=True, help="input tree JSON")
     parser.add_argument("--model", default=None,
-                        help="model for expand (default: summary_model from config.yaml)")
+                        help="model for expand (default: summary_model from config.py)")
     parser.add_argument("--trigger-pages", type=int, default=TRIGGER_PAGES,
                         help=f"only look ahead above this page count (default {TRIGGER_PAGES})")
     parser.add_argument("--routing", type=int, default=ROUTING_COST,

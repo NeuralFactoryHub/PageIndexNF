@@ -20,9 +20,9 @@ if __name__ == "__main__":
                       help='Refine the tree for search cost: a deterministic merge, then an '
                            'LLM expansion pass; pass `merge` to run the merge alone (PDF only)')
 
-    parser.add_argument('--model', type=str, default=None, help='Model to use (overrides config.yaml)')
+    parser.add_argument('--model', type=str, default=None, help='Model to use (overrides config.py defaults)')
     parser.add_argument('--summary-model', type=str, default=None,
-                      help='Model for node summaries (defaults to --model, then config.yaml)')
+                      help='Model for node summaries (defaults to --model, then config.py defaults)')
 
     parser.add_argument('--toc-check-pages', type=int, default=None,
                       help='Number of pages to check for table of contents (PDF only)')
@@ -146,7 +146,7 @@ if __name__ == "__main__":
             'if_add_node_id': args.if_add_node_id
         }
         
-        # Load config with defaults from config.yaml
+        # Load config with defaults from config.py
         opt = config_loader.load(user_opt)
         
         toc_with_page_number = asyncio.run(md_to_tree(
