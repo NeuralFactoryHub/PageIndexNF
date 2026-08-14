@@ -652,27 +652,18 @@ def add_node_text_with_labels(node, pdf_pages):
 
 
 async def generate_node_summary(node, model=None):
-    # title anchors the model to the right section when sibling nodes share page text
-    title = node.get('title')
-    title_block = (
-        f"###SECTION TITLE###\n{title}\n###END SECTION TITLE###\n\n"
-        f"The title above identifies the specific section you must summarize. "
-        f"Focus only on the content belonging to that titled section, even if the provided text spans a broader page.\n\n"
-        if title else ""
-    )
     prompt = f"""You are given one section of a larger document.
 Your job is to write a summary of THIS section only.
 
 ###OUTPUT STRUCTURE###
-[3-6 keyword/entities that identifies what appears in this section].\n\n
-[the main topic this section specifically contains, explained in one or two 30-word sentences].\n\n
+[The main topic and purpose of this section, explained in a 60-word (or less) paragraph. Directly to the point. Cut to the chase].
 
 ###OUTPUT LANGUAGE###
 Write in the same language as the section text.
 
-{title_block}###SECTION TEXT###
-{node['text']}
-###END SECTION TEXT###
+###SECTION###
+<section_title>{node['title']}</section_title>
+<section_text>{node['text']}</section_text>
 
 ###OUTPUT###
 Return only the summary.
