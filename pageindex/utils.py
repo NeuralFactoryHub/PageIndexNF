@@ -658,7 +658,7 @@ Your job is to write a summary of THIS section only.
 ###HOW TO WRITE IT###
 State directly the specific topics, entities, values, and details it contains.
 Do NOT describe the document as a whole, do NOT restate its purpose or legal framework.
-Begin with: "In this section you will find..."
+Begin with: "In this section you will find..." (use equivalent in the output language).
 
 ###OUTPUT LANGUAGE###
 Write in the same language as the section text.
