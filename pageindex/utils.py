@@ -655,10 +655,9 @@ async def generate_node_summary(node, model=None):
     prompt = f"""You are given one section of a larger document. 
 Your job is to write a summary of THIS section only. 
 
-###HOW TO WRITE IT###
-State directly the specific topics, entities, values, and details it contains.
-Do NOT describe the document as a whole, do NOT restate its purpose or legal framework.
-Begin with: "In this section you will find..." (use equivalent in the output language).
+###OUTPUT STRUCTURE###
+[3-6 keyword/entities that identifies what appears in this section].\n\n
+[the main topic this section specifically contains, explained in one or two 30-word sentences].\n\n
 
 ###OUTPUT LANGUAGE###
 Write in the same language as the section text.
