@@ -1240,6 +1240,7 @@ async def tree_parser(page_list, opt, doc=None, logger=None):
 
 def page_index_main(doc, opt=None, pages=None, doc_name=None):
     logger = JsonLogger(doc_name or doc, log_dir=getattr(opt, 'log_dir', None))
+    set_llm_metadata(getattr(opt, 'llm_metadata', None))
 
     if pages is not None:
         import litellm

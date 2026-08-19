@@ -14,8 +14,19 @@ from dotenv import load_dotenv
 load_dotenv()
 from types import SimpleNamespace as config
 import re
+from contextvars import ContextVar
+
 from .config import DEFAULT_CONFIG
 from .errors import LLMConfigError, LLMUnavailableError
+
+# Set once per document by page_index_main, read by the litellm call sites. A ContextVar rather
+# than a module global because tree building runs many nodes concurrently under asyncio, and each
+# task must see the metadata of its own document.
+_llm_metadata: ContextVar[dict | None] = ContextVar("llm_metadata", default=None)
+
+
+def set_llm_metadata(metadata: dict | None) -> None:
+    _llm_metadata.set(metadata)
 
 # litellm is imported inside the functions that use it; eager import is slow
 # and fetches a remote model-cost map.
@@ -129,6 +140,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                     messages=messages,
                     temperature=0,
                     drop_params=True,
+                    metadata=_llm_metadata.get() or {},
                 )
             content = response.choices[0].message.content
             if return_finish_reason:
@@ -182,6 +194,7 @@ async def llm_acompletion(model, prompt):
                     messages=messages,
                     temperature=0,
                     drop_params=True,
+                    metadata=_llm_metadata.get() or {},
                 )
             return response.choices[0].message.content
         except Exception as e:

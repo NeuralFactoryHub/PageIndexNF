@@ -264,6 +264,32 @@ RUN apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-osd libreof
 
 Both are too heavy for a zip Lambda layer. Use a container-image Lambda.
 
+### Observability
+
+The fork does not depend on any tracing vendor. Enable one from the outside — litellm's callbacks
+are process-global, and the fork's model calls go through litellm:
+
+```python
+import litellm
+litellm.success_callback = ["langfuse"]
+litellm.failure_callback = ["langfuse"]
+```
+
+To group the many calls of one document into a single trace, pass metadata through:
+
+```python
+tree = build_tree(
+    pages=norm.pages,
+    doc_name=norm.doc_name,
+    llm_metadata={"trace_id": case_id, "trace_name": f"index:{norm.doc_name}", "tags": ["indexing"]},
+)
+```
+
+**Known gap:** a model identifier with no provider prefix (e.g. `gpt-4o-2024-11-20`) is dispatched
+through the OpenAI SDK directly, bypassing litellm — so neither the callbacks nor `llm_metadata`
+apply to it. Prefixed models (`bedrock/...`, `anthropic/...`, `litellm/...`) go through litellm and
+are fully traced. This is silent: metrics simply stop appearing.
+
 ### Which errors to retry
 
 | Error | Retry? |

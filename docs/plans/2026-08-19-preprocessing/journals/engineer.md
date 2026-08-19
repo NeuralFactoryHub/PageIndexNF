@@ -152,3 +152,25 @@
 - sync:  `LLMUnavailableError | 5.0 s`
 - async: `LLMUnavailableError | 5.0 s`
 - import smoke test: `ok`
+
+#### [$(date +%H:%M)] Task 13: Pass-through LLM metadata for consumer tracing
+
+**What:** Added a `ContextVar`-based mechanism to forward per-document metadata (e.g. Langfuse `trace_id`) to every litellm call without threading a parameter through the ~20 upstream call sites. Four files modified: `config.py` (new `llm_metadata` key), `utils.py` (ContextVar declaration + `set_llm_metadata()` + `metadata=` at both litellm call sites), `page_index.py` (one call to `set_llm_metadata` at the top of `page_index_main`), and `README.md` (new Observability section).
+
+**Why:** The consumer enables Langfuse via litellm's process-global callbacks, which means the fork imports nothing and holds no credentials — good separation. But litellm routes metadata per call, and the calls are ours. Without this pass-through, every model call produces an anonymous span: 40+ spans per document with no way to attribute cost or latency to a specific indexing job. The ContextVar rather than a module global is essential because tree building dispatches many concurrent asyncio tasks per document; a plain global would let one task's `set` stomp on another's `get`.
+
+**Alternatives considered:** (1) Thread `opt` through the ~20 call sites that invoke `llm_completion`/`llm_acompletion` — rejected because it means editing upstream code everywhere, which is what the fork explicitly avoids. (2) A module-level global — rejected because asyncio concurrency makes it a race condition. ContextVar is the asyncio-idiomatic solution: each task's token propagates the value set in its parent coroutine.
+
+**Files touched:**
+- `pageindex/config.py` — added `llm_metadata: None`
+- `pageindex/utils.py` — added `ContextVar` import, `_llm_metadata` ContextVar, `set_llm_metadata()`, `metadata=` on `litellm.completion` and `litellm.acompletion` (not the OpenAI SDK branches)
+- `pageindex/page_index.py` — added `set_llm_metadata(getattr(opt, 'llm_metadata', None))` in `page_index_main`
+- `README.md` — added `### Observability` section with known-gap callout for unprefixed model ids
+
+**Verification results:**
+- Step 6 (spy intercept): `metadata forwarded: {'trace_id': 'abc123'}` ✓
+- Step 7 (config loader): `{'trace_id': 'x'}` then `None` ✓
+- Clamp regression: `LLMUnavailableError | 3.0 s` ✓
+- Package import: `ok` ✓
+
+**Nothing wrong or ambiguous in the plan.** The only subtle point correctly flagged by the plan: `metadata=` must NOT be added to the OpenAI SDK branches (`_openai_sync_client.chat.completions.create` and `_openai_async_client.chat.completions.create`), which do not accept that parameter. The `if use_openai_sdk / else` structure in both functions makes this a straightforward edit to the `else` branch only.
