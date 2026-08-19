@@ -282,44 +282,46 @@ def preprocess(
     doc, classified = _classify(data)
     classify_seconds = time.perf_counter() - started
 
-    ocr_ordinals = [ordinal for ordinal, _, needs_ocr in classified if needs_ocr]
-    ocr_text = {}
-    ocr_seconds = 0.0
-    if ocr_ordinals:
-        started = time.perf_counter()
-        ocr_text = asyncio.run(
-            _ocr_pages(doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency)
-        )
-        ocr_seconds = time.perf_counter() - started
-        if not ocr_text:
-            raise OCRError(
-                f"OCR failed on every one of {len(ocr_ordinals)} scanned page(s)",
-                doc_name=name,
-                pages=ocr_ordinals,
+    try:
+        ocr_ordinals = [ordinal for ordinal, _, needs_ocr in classified if needs_ocr]
+        ocr_text = {}
+        ocr_seconds = 0.0
+        if ocr_ordinals:
+            started = time.perf_counter()
+            ocr_text = asyncio.run(
+                _ocr_pages(doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency)
             )
+            ocr_seconds = time.perf_counter() - started
+            if not ocr_text:
+                raise OCRError(
+                    f"OCR failed on every one of {len(ocr_ordinals)} scanned page(s)",
+                    doc_name=name,
+                    pages=ocr_ordinals,
+                )
 
-    pages = []
-    failed = []
-    for ordinal, text, needs_ocr in classified:
-        if needs_ocr:
-            if ordinal in ocr_text:
-                pages.append(ocr_text[ordinal])
+        pages = []
+        failed = []
+        for ordinal, text, needs_ocr in classified:
+            if needs_ocr:
+                if ordinal in ocr_text:
+                    pages.append(ocr_text[ordinal])
+                else:
+                    pages.append("")
+                    failed.append(ordinal)
             else:
-                pages.append("")
-                failed.append(ordinal)
-        else:
-            pages.append(text)
+                pages.append(text)
 
-    report = PreprocessReport(
-        source_format=source_format,
-        page_count=len(pages),
-        text_pages=len(pages) - len(ocr_ordinals),
-        ocr_pages=len(ocr_ordinals) - len(failed),
-        failed_pages=failed,
-        chars_extracted=sum(len(p) for p in pages),
-        convert_seconds=convert_seconds,
-        classify_seconds=classify_seconds,
-        ocr_seconds=ocr_seconds,
-    )
-    doc.close()
-    return Normalized(pages=pages, doc_name=name, report=report)
+        report = PreprocessReport(
+            source_format=source_format,
+            page_count=len(pages),
+            text_pages=len(pages) - len(ocr_ordinals),
+            ocr_pages=len(ocr_ordinals) - len(failed),
+            failed_pages=failed,
+            chars_extracted=sum(len(p) for p in pages),
+            convert_seconds=convert_seconds,
+            classify_seconds=classify_seconds,
+            ocr_seconds=ocr_seconds,
+        )
+        return Normalized(pages=pages, doc_name=name, report=report)
+    finally:
+        doc.close()
