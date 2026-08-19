@@ -258,6 +258,10 @@ def preprocess(
     Returns Normalized(pages, doc_name, report). `pages` is indexed by source ordinal minus one;
     a page whose OCR failed holds "" and its ordinal is listed in report.failed_pages. Page
     positions are never compacted: downstream citations reference source ordinals.
+
+    Calls asyncio.run() internally for OCR concurrency; must not be called from inside a running
+    event loop. Async callers (e.g. FastAPI routes) must offload to a thread — see client.py's
+    ThreadPoolExecutor pattern.
     """
     data = _read_source(source)
     name = filename or (os.path.basename(str(source)) if not isinstance(source, bytes) else "Untitled")

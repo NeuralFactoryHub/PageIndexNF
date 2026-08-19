@@ -80,9 +80,12 @@ _UNRECOVERABLE_STATUS = frozenset({401, 403, 404})
 # litellm maps missing credentials to InternalServerError/500, which must stay
 # retryable in general (a genuine 500 from the provider IS transient). We catch
 # the misclassification by inspecting the message text. Layer 1 of the fix.
+# STS-specific phrases cover expired/invalid session tokens from assume-role;
+# these arrive as 400/500 from Bedrock and would otherwise burn the full budget.
 _CREDENTIAL_PATTERNS = re.compile(
     r"missing credentials|api_key|could not locate credentials|"
-    r"access denied|unrecognized client|invalid api key|no credentials",
+    r"access denied|unrecognized client|invalid api key|no credentials|"
+    r"security token|ExpiredToken|UnrecognizedClientException",
     re.IGNORECASE,
 )
 
