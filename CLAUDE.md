@@ -1,6 +1,6 @@
 ## Rules
 
-- Extremely concise in all interactions and commit messages. Sacrifice grammar for concision.
+- Extremely concise in all interactions and commit messages. Sacrifice grammar for concision. CUT TO THE CHASE!!!
 - At end of each plan, list unresolved questions (extremely concise).
 - DO NOT write tests unless explicitly requested
 - DO NOT run dev server - assume already running
