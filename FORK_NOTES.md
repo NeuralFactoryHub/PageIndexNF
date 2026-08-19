@@ -72,6 +72,45 @@ carries no discriminative signal, so the node-distinctive content starts a few t
 (minor cost for retrieval/embedding). The core goals of #3 hold — section-scoped (not
 whole-document) content, source-language output, no upstream meta-preamble.
 
+### 4. Document preprocessing — `pageindex/preprocess.py`
+**Why:** upstream indexes only born-digital PDFs. Real client documents arrive as scanned PDFs
+and Office files. Scanned pages return empty text from `extract_text()`, so without OCR the tree
+is built from blank pages and looks valid. OCR must run before tree building, not as a downstream
+step, because section headings only exist as pixels in scanned annexes — a tree built from the
+text layer loses the structural boundaries exactly where the annexes begin. `preprocess.py` is
+isolated (like `build_tree.py`) so upstream merges do not conflict.
+**Status:** DONE
+
+### 5. Typed error taxonomy — `pageindex/errors.py`
+**Why:** upstream raises bare `Exception` everywhere and returns `""` on LLM exhaustion. Both
+collapse unrelated causes into one indistinguishable symptom. A caller cannot tell a broken
+document from a throttled model and cannot decide whether retrying is sensible. The typed
+hierarchy makes that distinction part of the public contract: only `LLMUnavailableError` is
+worth a retry.
+**Status:** DONE
+
+### 6. LLM retry raises `LLMUnavailableError` instead of returning `""`
+**Why:** returning `""` on exhaustion let transient throttling be reported as a broken document —
+a silent, wrong result that wasted the full retry budget before appearing. Raising a typed error
+lets the caller see the cause immediately and decide whether to retry. This is a deliberate
+breaking change: documents that previously indexed badly-but-successfully now fail loudly.
+**Status:** DONE
+
+### 7. Configurable `log_dir` — telemetry off by default
+**Why:** `JsonLogger.__init__` previously called `os.makedirs("./logs")` unconditionally. On
+Lambda the filesystem is read-only outside `/tmp`, so this crashed before a single page was
+processed. `log_dir=None` (the new default) disables telemetry entirely; pass a writable path
+to re-enable it.
+**Status:** DONE
+
+### 8. `build_tree(pages=...)` — second input path from `preprocess()`
+**Why:** downstream the consuming backend extracts page text a second time, independently of the
+tree, to build the catalog that `get_page_content` serves. Text hidden inside `build_tree` would
+produce a correct tree while the backend kept serving blank pages. Returning `norm.pages` removes
+that second read and makes one source of truth per document. The two paths (`source=` vs
+`pages=`) are mutually exclusive; passing both is an error.
+**Status:** DONE
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired

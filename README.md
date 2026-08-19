@@ -236,6 +236,56 @@ To address this, we introduced PageIndex OCR — the first long-context OCR mode
 
 ---
 
+## Preprocessing (fork addition)
+
+Documents are normalized before indexing. Always call `preprocess()` first:
+
+```python
+from pageindex import preprocess, build_tree
+
+norm = preprocess(raw_bytes, filename="Disposizioni ingresso.pdf")
+tree = build_tree(pages=norm.pages, doc_name=norm.doc_name)
+
+norm.pages    # per-page text; index = page number - 1
+norm.report   # source_format, page_count, text_pages, ocr_pages, failed_pages, chars_extracted
+```
+
+`preprocess()` converts Office files to PDF, detects scanned pages, and OCRs only those.
+Page positions are never compacted: a page whose OCR failed holds `""` and its number appears
+in `report.failed_pages`, so page numbers stay aligned with the source document.
+
+### Required system binaries
+
+The library asserts these; it cannot install them.
+
+```dockerfile
+RUN apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-osd libreoffice
+```
+
+Both are too heavy for a zip Lambda layer. Use a container-image Lambda.
+
+### Which errors to retry
+
+| Error | Retry? |
+|---|---|
+| `LLMUnavailableError` | **Yes** — throttling or transport. Exponential backoff. |
+| `LLMConfigError` | No — bad key or missing model. |
+| `TreeParseError` | No — deterministic; retrying only spends time. |
+| `UnreadableInputError` and subclasses | No — the document must be fixed or re-uploaded. |
+| `MissingSystemDependencyError` | No — fix the runtime image. |
+
+### Breaking changes
+
+- The LLM retry loop used to return `""` after exhausting its attempts; it now raises
+  `LLMUnavailableError`. Documents that previously indexed badly-but-successfully will start
+  failing loudly. **This is the intent.**
+- `build_tree(source=...)` now raises `NotPreprocessedError` for a PDF with no text layer
+  instead of producing an empty tree.
+- Telemetry no longer writes to `./logs` by default. Pass `log_dir="/tmp/pageindex"` to
+  re-enable it.
+
+---
+
 # 📈 Case Study: PageIndex Leads Finance QA Benchmark
 
 [Mafin 2.5](https://vectify.ai/mafin) is a reasoning-based RAG system for financial document analysis, powered by **PageIndex**. It achieved a state-of-the-art [**98.7% accuracy**](https://vectify.ai/blog/Mafin2.5) on [FinanceBench](https://arxiv.org/abs/2311.11944) (financial document QA benchmark), significantly outperforming traditional vector-based RAG systems.
