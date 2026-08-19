@@ -14,6 +14,8 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pypdfium2 as pdfium
+
 from .errors import (
     ConversionError,
     MissingSystemDependencyError,
@@ -89,3 +91,58 @@ def _convert_to_pdf(data: bytes, suffix: str) -> bytes:
                 f"{result.stderr.decode(errors='replace')[:500]}"
             )
         return out.read_bytes()
+
+
+MIN_CHARS_PER_PAGE = 50
+# A page with an almost-full-page image AND little text is a scan carrying a stamped footer.
+# The text gate is essential: without it, born-digital pages with full-page figures get sent to
+# OCR, which then REPLACES their perfect text layer with degraded OCR output. Measured on
+# examples/documents/PRML.pdf: 55 false positives without the gate, 0 with it.
+SUSPICIOUS_CHARS_PER_PAGE = 250
+IMAGE_AREA_RATIO = 0.5
+
+
+def _page_is_image(page, text: str) -> bool:
+    """Decide whether a page needs OCR.
+
+    Character count alone cannot separate "page with 60 characters of real content" from
+    "scanned page with a 60-character DMS footer stamped on top", and the corpus is full of the
+    latter. The second signal — a near-full-page image on a text-poor page — catches it.
+    """
+    chars = len(text.strip())
+    if chars < MIN_CHARS_PER_PAGE:
+        return True
+    if chars >= SUSPICIOUS_CHARS_PER_PAGE:
+        return False
+    page_area = page.get_width() * page.get_height()
+    if page_area <= 0:
+        return False
+    # max_depth=4: scanned pages often nest the image inside form XObjects, below pypdfium2's
+    # default depth of 2.
+    for obj in page.get_objects(filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,), max_depth=4):
+        left, bottom, right, top = obj.get_pos()
+        if abs(right - left) * abs(top - bottom) >= IMAGE_AREA_RATIO * page_area:
+            return True
+    return False
+
+
+def _classify(pdf_bytes: bytes):
+    """Return (pdfium document, [(ordinal, text, needs_ocr), ...]). Ordinals are 1-based.
+
+    The document stays open: OCR renders from it afterwards. Per-page handles are closed as we
+    go, because pypdfium2 holds native buffers that Python's GC does not release promptly — and
+    a 36 MB scan is 51 of them.
+    """
+    doc = pdfium.PdfDocument(pdf_bytes)
+    classified = []
+    for i, page in enumerate(doc, start=1):
+        textpage = page.get_textpage()
+        try:
+            # get_text_bounded(), not get_text_range(): the latter warns on default params in 4.30.
+            text = textpage.get_text_bounded() or ""
+            needs_ocr = _page_is_image(page, text)
+        finally:
+            textpage.close()
+            page.close()
+        classified.append((i, text, needs_ocr))
+    return doc, classified
