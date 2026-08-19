@@ -48,3 +48,44 @@ def _require_tesseract() -> None:
             "tesseract not found. Install it in the runtime image: "
             "`apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-osd`"
         )
+
+
+_CONVERSION_TIMEOUT_SECONDS = 120
+
+
+def _convert_to_pdf(data: bytes, suffix: str) -> bytes:
+    """Render an Office document to PDF via LibreOffice headless.
+
+    Conversion is needed for pagination, not fidelity: PageIndex cites by page number and a
+    .docx has no pages until something lays it out.
+    """
+    soffice = _find_soffice()
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / f"input{suffix}"
+        src.write_bytes(data)
+        try:
+            result = subprocess.run(
+                # --norestore matters: without it a previously crashed instance hangs the
+                # conversion on a recovery dialog nobody will ever answer.
+                # -env:UserInstallation isolates the profile: warm Lambda invocations share
+                # /tmp, and two concurrent conversions would otherwise contend for one profile.
+                [soffice,
+                 f"-env:UserInstallation=file://{tmp}/lo_profile",
+                 "--headless", "--norestore", "--convert-to", "pdf",
+                 "--outdir", tmp, str(src)],
+                capture_output=True,
+                timeout=_CONVERSION_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise ConversionError(
+                f"LibreOffice timed out after {_CONVERSION_TIMEOUT_SECONDS}s"
+            ) from e
+
+        out = src.with_suffix(".pdf")
+        # LibreOffice can exit 0 and produce nothing, so the return code alone is not evidence.
+        if result.returncode != 0 or not out.exists():
+            raise ConversionError(
+                f"LibreOffice failed (exit {result.returncode}): "
+                f"{result.stderr.decode(errors='replace')[:500]}"
+            )
+        return out.read_bytes()
