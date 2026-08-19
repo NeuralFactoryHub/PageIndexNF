@@ -96,12 +96,19 @@ lets the caller see the cause immediately and decide whether to retry. This is a
 breaking change: documents that previously indexed badly-but-successfully now fail loudly.
 
 The retry loop also replaces flat 1 s sleeps with exponential backoff (full jitter) bounded by a
-wall-clock budget (`_MAX_TOTAL_RETRY_SECONDS`). Without a budget, a permanent error (bad key,
-missing model) that slips past `_is_unrecoverable` incurs the full backoff series before raising;
-at the previous 10 retries × up to 30 s each, that is a ~300 s hang versus the ~20 s of the flat
-sleep it replaced — a 15× cost increase for the failure path. The clamp in each iteration ensures
-the budget cannot be overrun by more than one backoff interval even if the check passes just before
-expiry.
+wall-clock budget (`_MAX_TOTAL_RETRY_SECONDS`, 60 s). The backoff alone made permanent failures far
+more expensive than the flat sleep it replaced: a permanent error that slips past
+`_is_unrecoverable` runs the whole series, `1+2+4+8+16+30+30+30+30 ≈ 151 s` worst case, against
+9 s before. Measured with no credentials configured, that path took ~150 s — 15× the old cost, on a
+Lambda where every failing call competes for one 890 s invocation.
+
+Two layers bound it. `_is_unrecoverable` also matches the exception *message*, because litellm
+reports missing credentials as `InternalServerError` with status 500 and a genuine 500 must stay
+retryable — the status code alone cannot separate them. Independently, each sleep is clamped to the
+budget still remaining (`min(backoff, remaining)`), so the budget holds exactly rather than being
+overrun by up to one backoff interval. Verified: a 3 s budget returns at 3.01 s, an 8 s budget at
+8.00 s. The clamp is the load-bearing half — it bounds any future misclassification the message
+matching does not anticipate.
 **Status:** DONE
 
 ### 7. Configurable `log_dir` — telemetry off by default
