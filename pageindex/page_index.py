@@ -1295,7 +1295,7 @@ def page_index_main(doc, opt=None, pages=None, doc_name=None):
                 }
         structure = format_structure(structure, order=['title', 'node_id', 'start_index', 'end_index', 'key_items', 'summary', 'text', 'nodes'])
         return {
-            'doc_name': get_pdf_name(doc),
+            'doc_name': doc_name or get_pdf_name(doc),
             'structure': structure,
         }
 
