@@ -94,6 +94,14 @@ worth a retry.
 a silent, wrong result that wasted the full retry budget before appearing. Raising a typed error
 lets the caller see the cause immediately and decide whether to retry. This is a deliberate
 breaking change: documents that previously indexed badly-but-successfully now fail loudly.
+
+The retry loop also replaces flat 1 s sleeps with exponential backoff (full jitter) bounded by a
+wall-clock budget (`_MAX_TOTAL_RETRY_SECONDS`). Without a budget, a permanent error (bad key,
+missing model) that slips past `_is_unrecoverable` incurs the full backoff series before raising;
+at the previous 10 retries × up to 30 s each, that is a ~300 s hang versus the ~20 s of the flat
+sleep it replaced — a 15× cost increase for the failure path. The clamp in each iteration ensures
+the budget cannot be overrun by more than one backoff interval even if the check passes just before
+expiry.
 **Status:** DONE
 
 ### 7. Configurable `log_dir` — telemetry off by default
@@ -109,6 +117,25 @@ tree, to build the catalog that `get_page_content` serves. Text hidden inside `b
 produce a correct tree while the backend kept serving blank pages. Returning `norm.pages` removes
 that second read and makes one source of truth per document. The two paths (`source=` vs
 `pages=`) are mutually exclusive; passing both is an error.
+**Status:** DONE
+
+### 9. Pass-through `llm_metadata` for consumer tracing
+**Why:** the consumer enables Langfuse via litellm's process-global callbacks — the fork imports no
+tracing SDK and holds no keys, so vendor choice stays entirely theirs. But Langfuse metadata
+travels per call, and the model calls are the fork's; it cannot be injected from outside. The fork
+owns the pass-through, not the instrumentation.
+
+The value is carried on a `ContextVar` (`_llm_metadata`) set once in `page_index_main` and read at
+the two `litellm.completion` / `litellm.acompletion` call sites. A ContextVar rather than a module
+global because tree building dispatches many concurrent asyncio tasks per document — a plain global
+would let one task's set stomp on another's get. Threading a new `metadata=` argument through the
+~20 upstream call sites that invoke `llm_completion`/`llm_acompletion` was the alternative; it
+would have produced ~24 hunks instead of 4, making future merge conflicts significantly harder to
+read and resolve.
+
+Known gap: a model id with no provider prefix (e.g. `gpt-4o-2024-11-20`) bypasses litellm via the
+OpenAI SDK directly, so neither callbacks nor `llm_metadata` reach it. The symptom is metrics
+silently vanishing, not an error. Prefixed models (`bedrock/...`, `anthropic/...`) are unaffected.
 **Status:** DONE
 
 ## Config notes (not code changes — for the consumer)
