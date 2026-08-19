@@ -6,6 +6,7 @@ import random
 import re
 from .utils import *
 from .tree_optimize import merge_tree
+from .errors import TreeParseError
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1164,7 +1165,11 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
         elif mode == 'process_toc_no_page_numbers':
             return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger)
         else:
-            raise Exception('Processing failed')
+            raise TreeParseError(
+                "Could not derive a document structure: exhausted all TOC strategies "
+                "(process_toc_with_page_numbers, process_toc_no_page_numbers, process_no_toc)",
+                doc_name=getattr(logger, 'filename', None),
+            )
         
  
 async def process_large_node_recursively(node, page_list, opt=None, logger=None):
