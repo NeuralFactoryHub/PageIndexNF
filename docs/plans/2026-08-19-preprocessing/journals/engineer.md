@@ -174,3 +174,77 @@
 - Package import: `ok` ✓
 
 **Nothing wrong or ambiguous in the plan.** The only subtle point correctly flagged by the plan: `metadata=` must NOT be added to the OpenAI SDK branches (`_openai_sync_client.chat.completions.create` and `_openai_async_client.chat.completions.create`), which do not accept that parameter. The `if use_openai_sdk / else` structure in both functions makes this a straightforward edit to the `else` branch only.
+
+---
+
+#### [Post-review] Code Review Fixes (2026-08-19)
+
+Three defects found by Gandalf's code review were fixed in three separate commits. All applied to `feature/preprocessing` branch, none touching `feature/customizations`.
+
+---
+
+**Fix 1 — `doc_name` dropped on default `if_add_doc_description` path (`page_index.py:1298`)**
+
+**What:** Changed the second return site in `page_index_builder` from `'doc_name': get_pdf_name(doc)` to `'doc_name': doc_name or get_pdf_name(doc)`. The first return site (inside the `if_add_doc_description == 'yes'` branch, line 1292) had already been fixed in Batch 3; this second site — the `else` path — was missed.
+
+**Why:** `DEFAULT_CONFIG` sets `if_add_doc_description` to `"no"`, so line 1298 is the default code path for every tree built without explicitly enabling doc descriptions. On the `pages=` route, `doc` is `None`, making `get_pdf_name(None)` return `'Untitled'`. Every `build_tree(pages=norm.pages, doc_name="real name.pdf")` call with default config silently produced a tree with `doc_name='Untitled'`, corrupting the consumer's retrieval catalog without raising any error. The bug would only surface at query time. Lesson: when a fix involves multiple similar call sites, grep for the pattern (`get_pdf_name(doc)`) rather than trusting memory of which sites were changed.
+
+**Verification:** `grep -n "get_pdf_name(doc)" pageindex/page_index.py` shows three results: line 1267 (the `NotPreprocessedError` raise, correct as-is since `doc` is not `None` there), and lines 1292 and 1298 both with `doc_name or get_pdf_name(doc)`. No bare `get_pdf_name(doc)` remains in the return sites.
+
+**Files touched:** `pageindex/page_index.py` (line 1298)
+
+---
+
+**Fix 2 — `PdfDocument` handle leaks on `OCRError` path (`preprocess.py`)**
+
+**What:** Wrapped the body from after `_classify()` through the `return Normalized(...)` in a `try/finally` block with `doc.close()` in the `finally`. Removed the standalone `doc.close()` at what was line 324, now superseded by the `finally`.
+
+**Why:** `_classify()` returns an open `PdfDocument`. The `raise OCRError(...)` at lines 294–299 (all-OCR-fail path) unwinds the stack before the old `doc.close()` at line 324 was reached. On a warm Lambda, each all-pages-failed invocation accumulated one unreleased pdfium native handle. A `try/finally` guarantees `doc.close()` runs on every exit path — normal return, `OCRError` raise, and any unexpected exception. This is the idiomatic Python pattern for deterministic resource release: analogous to how a `with` statement implements `__enter__`/`__exit__`, but without requiring `PdfDocument` to be a context manager.
+
+**Verification output:**
+```
+raised: OCRError - OCR failed on every one of 4 scanned page(s) (doc='Lube Duvri.pdf', pages=[4, 5, ...
+reached here without a crash -- handle released
+```
+Monkeypatching `_ocr_pages` to return an empty dict forces the `OCRError` raise; "reached here without a crash" confirms the `finally` ran.
+
+**Files touched:** `pageindex/preprocess.py` (try/finally wrapping lines 285–327)
+
+---
+
+**Fix 3 — AWS STS credential patterns + `asyncio.run()` constraint in docstring**
+
+**What:** Added three AWS STS error phrases to `_CREDENTIAL_PATTERNS` in `utils.py`: `security token`, `ExpiredToken`, `UnrecognizedClientException`. Also added a paragraph to `preprocess()`'s docstring noting that it calls `asyncio.run()` internally and must not be called from inside a running event loop, pointing to `client.py`'s ThreadPoolExecutor pattern.
+
+**Why for patterns:** The consumer runs on Bedrock with STS assume-role credentials. An expired or invalid session token returns one of these three phrases in the error message. Without the patterns, `_is_unrecoverable()` returns `False`, the error is treated as transient, and the retry loop burns the full 60-second budget before raising `LLMUnavailableError`. With the patterns, it fails immediately. This is the most likely permanent-auth failure in the production deployment path.
+
+**Why for docstring:** The consumer is an async FastAPI backend. Calling a synchronous function that internally calls `asyncio.run()` from inside an async route raises `RuntimeError: This event loop is already running`. `client.py` already works around this with a `ThreadPoolExecutor`, but the constraint was not documented, so the next developer would have to discover it the hard way. Documentation is the right fix; `client.py` is already correct.
+
+**Verification:**
+- `python -c "import pageindex; print('ok')"` → `ok`
+- Final pattern list includes `security token|ExpiredToken|UnrecognizedClientException` alongside existing patterns.
+
+**Files touched:** `pageindex/utils.py`, `pageindex/preprocess.py` (docstring only)
+
+---
+
+#### [QA-fix] Task: Wrap pdfium.PdfDocument() — PdfiumError escapes typed hierarchy
+
+**What:** Added `UnreadableInputError` to the imports in `preprocess.py`. Added a `doc_name: str = None` parameter to `_classify()`. Wrapped `pdfium.PdfDocument(pdf_bytes)` in a `try/except Exception` that re-raises as `UnreadableInputError(...) from e`, distinguishing the password case by checking for "password" in the lowercased error message. Updated the one call site in `preprocess()` to pass `doc_name=name`. Extended FORK_NOTES.md entry 5 with a bug-fix annotation (no new entry, because this closes a coverage gap in the existing error taxonomy divergence, not a new divergence in the public contract).
+
+**Why:** `pdfium.PdfDocument()` is a C-library call that raises its own `PdfiumError` class, which is not a subclass of `PageIndexError`. A consumer catching `except PageIndexError` — the stated catch-all for this library — would not catch corrupt, zero-byte, or password-protected PDF inputs. Client-supplied PDFs arriving as corrupt files or protected exports are not hypothetical: the whole point of the error taxonomy is that every input failure emits a structured, typed signal so the caller can decide what to do without parsing raw exception messages. This was a gap at the exact boundary the feature was designed to close.
+
+**Alternatives considered:** (1) Wrap inside `preprocess()` instead of `_classify()` — rejected because `_classify()` is the function that opens the document; the fix belongs at the error source, not one frame up. (2) Add a new `EncryptedPdfError` subclass — rejected per the QA brief: a clear message on `UnreadableInputError` is sufficient, and a new class would widen the public API surface unnecessarily. (3) Catch only `pdfium.PdfiumError` instead of bare `Exception` — considered, but bare `Exception` is safer: if pdfium ever raises a non-`PdfiumError` from the constructor, it should still be wrapped, not escape.
+
+**Other pdfium/pytesseract calls surveyed:** `pytesseract.image_to_string()` is called inside `_ocr_pages()`'s per-page `run()` coroutine, which already wraps it in `except Exception` — handled. `doc[ordinal-1].render()` in the same coroutine is NOT wrapped; a render failure on a valid, opened document would escape the taxonomy. This is a distinct category (page-render failure on a structurally valid PDF) vs. input-validity failure at open time. Not fixed per instructions; noted here for awareness.
+
+**Verification output:**
+```
+empty.pdf -> UnreadableInputError - Failed to load PDF: Failed to load document (PDFium: Data format error). (doc='e
+corrupt.pdf -> UnreadableInputError - Failed to load PDF: Failed to load document (PDFium: Data format error). (doc='c
+Lube Duvri.pdf 36 4 []
+DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf 29 1 []
+```
+Password-protected PDF: not verifiable — no PDF encryption library (pypdf, pikepdf) available in the venv, and `uv add` is disallowed per session constraints. The password-detection branch (`"password" in msg_lower`) was not exercised end-to-end.
+
+**Files touched:** `pageindex/preprocess.py`, `FORK_NOTES.md`, `docs/plans/2026-08-19-preprocessing/journals/engineer.md`

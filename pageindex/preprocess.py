@@ -24,6 +24,7 @@ from .errors import (
     ConversionError,
     MissingSystemDependencyError,
     OCRError,
+    UnreadableInputError,
     UnsupportedFormatError,
 )
 
@@ -131,14 +132,24 @@ def _page_is_image(page, text: str) -> bool:
     return False
 
 
-def _classify(pdf_bytes: bytes):
+def _classify(pdf_bytes: bytes, doc_name: str = None):
     """Return (pdfium document, [(ordinal, text, needs_ocr), ...]). Ordinals are 1-based.
 
     The document stays open: OCR renders from it afterwards. Per-page handles are closed as we
     go, because pypdfium2 holds native buffers that Python's GC does not release promptly — and
     a 36 MB scan is 51 of them.
     """
-    doc = pdfium.PdfDocument(pdf_bytes)
+    try:
+        doc = pdfium.PdfDocument(pdf_bytes)
+    except Exception as e:
+        # Distinguish password-protected PDFs so consumers can act on the message rather than
+        # treating all unreadable PDFs identically.
+        msg_lower = str(e).lower()
+        if "password" in msg_lower:
+            msg = f"PDF is encrypted (password-protected); provide an unlocked copy: {e}"
+        else:
+            msg = f"Failed to load PDF: {e}"
+        raise UnreadableInputError(msg, doc_name=doc_name) from e
     classified = []
     for i, page in enumerate(doc, start=1):
         textpage = page.get_textpage()
@@ -283,7 +294,7 @@ def preprocess(
         )
 
     started = time.perf_counter()
-    doc, classified = _classify(data)
+    doc, classified = _classify(data, doc_name=name)
     classify_seconds = time.perf_counter() - started
 
     try:

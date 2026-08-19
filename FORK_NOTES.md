@@ -89,6 +89,15 @@ hierarchy makes that distinction part of the public contract: only `LLMUnavailab
 worth a retry.
 **Status:** DONE
 
+**Extended (2026-08-19 — bug fix):** `pdfium.PdfDocument()` in `_classify()` raised `PdfiumError`
+(not a `PageIndexError` subclass) on zero-byte, corrupt, and password-protected PDFs, breaking the
+typed contract for those inputs. Fixed by wrapping the constructor call in `_classify()` and
+re-raising as `UnreadableInputError(...) from e`. Password-protected inputs are distinguished in
+the message ("PDF is encrypted — provide an unlocked copy") so the consumer can act on the
+specific cause. No new exception class introduced; the message on `UnreadableInputError` carries
+the distinction. `_classify()` gains a `doc_name` parameter (one call site updated in
+`preprocess()`) so the error carries the filename.
+
 ### 6. LLM retry raises `LLMUnavailableError` instead of returning `""`
 **Why:** returning `""` on exhaustion let transient throttling be reported as a broken document —
 a silent, wrong result that wasted the full retry budget before appearing. Raising a typed error
