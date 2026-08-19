@@ -6,7 +6,7 @@ import random
 import re
 from .utils import *
 from .tree_optimize import merge_tree
-from .errors import TreeParseError
+from .errors import NotPreprocessedError, TreeParseError
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1238,18 +1238,33 @@ async def tree_parser(page_list, opt, doc=None, logger=None):
     return toc_tree
 
 
-def page_index_main(doc, opt=None):
-    logger = JsonLogger(doc, log_dir=getattr(opt, 'log_dir', None))
-    
-    is_valid_pdf = (
-        (isinstance(doc, str) and os.path.isfile(doc) and doc.lower().endswith(".pdf")) or 
-        isinstance(doc, BytesIO)
-    )
-    if not is_valid_pdf:
-        raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
+def page_index_main(doc, opt=None, pages=None, doc_name=None):
+    logger = JsonLogger(doc_name or doc, log_dir=getattr(opt, 'log_dir', None))
 
-    print('Parsing PDF...')
-    page_list = get_page_tokens(doc, model=opt.model)
+    if pages is not None:
+        import litellm
+        page_list = [
+            (text, litellm.token_counter(model=opt.model, text=text)) for text in pages
+        ]
+    else:
+        is_valid_pdf = (
+            (isinstance(doc, str) and os.path.isfile(doc) and doc.lower().endswith(".pdf")) or
+            isinstance(doc, BytesIO)
+        )
+        if not is_valid_pdf:
+            raise ValueError("Unsupported input type. Expected a PDF file path or BytesIO object.")
+
+        print('Parsing PDF...')
+        page_list = get_page_tokens(doc, model=opt.model)
+
+        # A PDF with no extractable text indexes as an empty-but-valid tree, which is the exact
+        # silent failure this fork exists to remove. Make the omission loud instead.
+        if not any(text.strip() for text, _ in page_list):
+            raise NotPreprocessedError(
+                "PDF has no extractable text layer. Call preprocess() first and pass "
+                "build_tree(pages=...)",
+                doc_name=get_pdf_name(doc),
+            )
 
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})
@@ -1273,7 +1288,7 @@ def page_index_main(doc, opt=None):
                 doc_description = generate_doc_description(clean_structure, model=getattr(opt, 'summary_model', None) or opt.model)
                 structure = format_structure(structure, order=['title', 'node_id', 'start_index', 'end_index', 'key_items', 'summary', 'text', 'nodes'])
                 return {
-                    'doc_name': get_pdf_name(doc),
+                    'doc_name': doc_name or get_pdf_name(doc),
                     'doc_description': doc_description,
                     'structure': structure,
                 }
