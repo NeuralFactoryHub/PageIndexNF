@@ -352,28 +352,30 @@ def get_pdf_name(pdf_path):
         meta = pdf_reader.metadata
         pdf_name = meta.title if meta and meta.title else 'Untitled'
         pdf_name = sanitize_filename(pdf_name)
+    else:
+        pdf_name = 'Untitled'
     return pdf_name
 
 
 class JsonLogger:
-    def __init__(self, file_path):
-        # Extract PDF name for logger name
+    def __init__(self, file_path, log_dir=None):
+        # No log_dir means telemetry is off: keep the same API but never touch the filesystem,
+        # which is read-only outside /tmp on Lambda.
+        self.log_dir = log_dir
+        self.log_data = []
         pdf_name = get_pdf_name(file_path)
-            
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filename = f"{pdf_name}_{current_time}.json"
-        os.makedirs("./logs", exist_ok=True)
-        # Initialize empty list to store all messages
-        self.log_data = []
+        if self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
 
     def log(self, level, message, **kwargs):
         if isinstance(message, dict):
             self.log_data.append(message)
         else:
             self.log_data.append({'message': message})
-        # Add new message to the log data
-        
-        # Write entire log data to file
+        if not self.log_dir:
+            return
         with open(self._filepath(), "w") as f:
             json.dump(self.log_data, f, indent=2)
 
@@ -391,7 +393,7 @@ class JsonLogger:
         self.log("ERROR", message, **kwargs)
 
     def _filepath(self):
-        return os.path.join("logs", self.filename)
+        return os.path.join(self.log_dir, self.filename)
     
 
 
