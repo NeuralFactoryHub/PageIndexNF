@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import textwrap
 from datetime import datetime
 import time
@@ -14,6 +15,7 @@ load_dotenv()
 from types import SimpleNamespace as config
 import re
 from .config import DEFAULT_CONFIG
+from .errors import LLMConfigError, LLMUnavailableError
 
 # litellm is imported inside the functions that use it; eager import is slow
 # and fetches a remote model-cost map.
@@ -69,6 +71,18 @@ def _is_unrecoverable(exc: Exception) -> bool:
     return getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS
 
 
+_MAX_BACKOFF_SECONDS = 30
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with full jitter.
+
+    A flat sleep sends N requests into the same congestion window; jitter spreads retries from
+    concurrent page tasks so they stop arriving in lockstep.
+    """
+    return random.uniform(0, min(2 ** attempt, _MAX_BACKOFF_SECONDS))
+
+
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
     use_openai_sdk = _is_openai_model(model)
     if model:
@@ -104,16 +118,14 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             return content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+                raise LLMConfigError(f"LLM rejected the request: {e}") from e
+            logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                time.sleep(1)
+                time.sleep(_backoff_seconds(i))
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                if return_finish_reason:
-                    return "", "error"
-                return ""
+                raise LLMUnavailableError(
+                    f"LLM unavailable after {max_retries} attempts: {e}"
+                ) from e
 
 
 async def llm_acompletion(model, prompt):
@@ -147,14 +159,14 @@ async def llm_acompletion(model, prompt):
             return response.choices[0].message.content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+                raise LLMConfigError(f"LLM rejected the request: {e}") from e
+            logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(_backoff_seconds(i))
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return ""
+                raise LLMUnavailableError(
+                    f"LLM unavailable after {max_retries} attempts: {e}"
+                ) from e
             
             
 def get_json_content(response):
