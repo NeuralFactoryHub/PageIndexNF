@@ -7,18 +7,23 @@ where the annexes begin.
 This library never installs system binaries — it asserts them. See the README for the
 Dockerfile lines the consumer must provide.
 """
+import asyncio
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pypdfium2 as pdfium
+import pytesseract
 
 from .errors import (
     ConversionError,
     MissingSystemDependencyError,
+    OCRError,
     UnsupportedFormatError,
 )
 
@@ -146,3 +151,175 @@ def _classify(pdf_bytes: bytes):
             page.close()
         classified.append((i, text, needs_ocr))
     return doc, classified
+
+
+OCR_DPI = 150
+OCR_LANG = "ita"
+# psm 1 (layout analysis + orientation detection), NOT the brief's psm 6. Two measurements on
+# real client documents forced this:
+#   - Columns: `DUVRI DL01_Toffetti.pdf` p12 is bilingual in two columns. psm 6 and 4 interleave
+#     Italian and English line by line (38-41 lines of mixed-language soup); psm 1 and 3 emit
+#     each column as a block (67 lines) at the same cost. psm 6 also mangled the heading
+#     "DUVRI DL01" into "x. -» DUVRI DLO1", and headings are what the tree is built from.
+#   - Rotation: `Lube Duvri.pdf` pages 4-7 are scans rotated 270 degrees. `page.get_rotation()`
+#     reports 0 — the rotation lives in the scanned image, not in PDF metadata — so only
+#     Tesseract's OSD sees it. psm 3 returns unreadable garbage on those pages; psm 1 recovers
+#     "DOCUMENTO UNICO DI VALUTAZIONE DEI RISCHI DA INTERFERENZE". Cost is ~25% more time.
+# OSD requires osd.traineddata: the runtime image MUST install tesseract-ocr-osd.
+OCR_PSM = 1
+OCR_CONCURRENCY = 3
+_OCR_TIMEOUT_SECONDS = 60
+
+
+def _ocr_image(image, lang: str, psm: int) -> str:
+    return pytesseract.image_to_string(
+        image, lang=lang, config=f"--psm {psm}", timeout=_OCR_TIMEOUT_SECONDS
+    )
+
+
+async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
+    """OCR the given ordinals concurrently. Returns {ordinal: text} for successes only.
+
+    Rendering stays on the event-loop thread and ONLY Tesseract is dispatched to threads.
+    pdfium is a C library that is not thread-safe: touching a PdfDocument from a thread other
+    than the one that created it segfaults the interpreter — no exception, no traceback, a dead
+    Lambda invocation. Measured, this costs nothing: rendering is 0.042s/page against ~0.4s for
+    Tesseract, so the expensive half is still the parallel one.
+    """
+    _require_tesseract()
+    semaphore = asyncio.Semaphore(concurrency)
+    results = {}
+
+    async def run(ordinal):
+        async with semaphore:
+            # Render inside the semaphore, not before it: otherwise every coroutine rasterizes
+            # up front and the whole document sits in memory as PIL images (~6.5 MB per page at
+            # 150 DPI). This bounds it to `concurrency` images. Rendering blocks the loop for
+            # ~0.042s, which is why it can stay here.
+            image = doc[ordinal - 1].render(scale=dpi / 72).to_pil()
+            try:
+                results[ordinal] = await asyncio.to_thread(_ocr_image, image, lang, psm)
+            except Exception as e:
+                # Broad on purpose: one page must never take the document down. exc_info keeps
+                # the traceback so a systematic bug is still diagnosable from the logs.
+                logging.warning(f"OCR failed on page {ordinal}: {e}", exc_info=True)
+
+    await asyncio.gather(*(run(o) for o in ordinals))
+    return results
+
+
+@dataclass
+class PreprocessReport:
+    source_format: str
+    page_count: int
+    text_pages: int
+    ocr_pages: int
+    failed_pages: list[int] = field(default_factory=list)
+    chars_extracted: int = 0
+    # Per-stage wall-clock. The consumer's own baseline found classification was ~70% of runtime
+    # — a stage that produces no output, only a routing decision. Without these numbers that is
+    # invisible.
+    convert_seconds: float = 0.0
+    classify_seconds: float = 0.0
+    ocr_seconds: float = 0.0
+
+
+@dataclass
+class Normalized:
+    pages: list[str]
+    doc_name: str
+    report: PreprocessReport
+
+
+def _read_source(source) -> bytes:
+    if isinstance(source, bytes):
+        return source
+    if isinstance(source, (str, Path)):
+        return Path(source).read_bytes()
+    raise TypeError(f"source must be bytes, str, or Path, got {type(source).__name__}")
+
+
+def preprocess(
+    source,
+    filename: str = None,
+    ocr_lang: str = OCR_LANG,
+    ocr_dpi: int = OCR_DPI,
+    ocr_psm: int = OCR_PSM,
+    ocr_concurrency: int = OCR_CONCURRENCY,
+) -> Normalized:
+    """Normalize any supported document into per-page text.
+
+    Always call this before `build_tree`. It decides internally, per page, whether any work is
+    needed — a born-digital PDF costs one text-extraction pass and rasterizes nothing.
+
+    source:   raw bytes, a filesystem path str, or a pathlib.Path
+    filename: supplies doc_name and disambiguates the format when bytes arrive with no extension
+
+    Returns Normalized(pages, doc_name, report). `pages` is indexed by source ordinal minus one;
+    a page whose OCR failed holds "" and its ordinal is listed in report.failed_pages. Page
+    positions are never compacted: downstream citations reference source ordinals.
+    """
+    data = _read_source(source)
+    name = filename or (os.path.basename(str(source)) if not isinstance(source, bytes) else "Untitled")
+    suffix = os.path.splitext(name)[1].lower()
+
+    convert_seconds = 0.0
+    if suffix in OFFICE_EXTENSIONS:
+        source_format = suffix.lstrip(".")
+        started = time.perf_counter()
+        data = _convert_to_pdf(data, suffix)
+        convert_seconds = time.perf_counter() - started
+    elif suffix == ".pdf" or data[:5] == b"%PDF-":
+        source_format = "pdf"
+    else:
+        raise UnsupportedFormatError(
+            f"Unsupported format {suffix or '<unknown>'}; expected PDF or one of "
+            f"{sorted(OFFICE_EXTENSIONS)}",
+            doc_name=name,
+        )
+
+    started = time.perf_counter()
+    doc, classified = _classify(data)
+    classify_seconds = time.perf_counter() - started
+
+    ocr_ordinals = [ordinal for ordinal, _, needs_ocr in classified if needs_ocr]
+    ocr_text = {}
+    ocr_seconds = 0.0
+    if ocr_ordinals:
+        started = time.perf_counter()
+        ocr_text = asyncio.run(
+            _ocr_pages(doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency)
+        )
+        ocr_seconds = time.perf_counter() - started
+        if not ocr_text:
+            raise OCRError(
+                f"OCR failed on every one of {len(ocr_ordinals)} scanned page(s)",
+                doc_name=name,
+                pages=ocr_ordinals,
+            )
+
+    pages = []
+    failed = []
+    for ordinal, text, needs_ocr in classified:
+        if needs_ocr:
+            if ordinal in ocr_text:
+                pages.append(ocr_text[ordinal])
+            else:
+                pages.append("")
+                failed.append(ordinal)
+        else:
+            pages.append(text)
+
+    report = PreprocessReport(
+        source_format=source_format,
+        page_count=len(pages),
+        text_pages=len(pages) - len(ocr_ordinals),
+        ocr_pages=len(ocr_ordinals) - len(failed),
+        failed_pages=failed,
+        chars_extracted=sum(len(p) for p in pages),
+        convert_seconds=convert_seconds,
+        classify_seconds=classify_seconds,
+        ocr_seconds=ocr_seconds,
+    )
+    doc.close()
+    return Normalized(pages=pages, doc_name=name, report=report)
