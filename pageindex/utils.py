@@ -66,10 +66,28 @@ def _log_provider_once(model, use_openai_sdk):
 # today. An unknown status is a transport failure and stays retryable.
 _UNRECOVERABLE_STATUS = frozenset({401, 403, 404})
 
+# litellm maps missing credentials to InternalServerError/500, which must stay
+# retryable in general (a genuine 500 from the provider IS transient). We catch
+# the misclassification by inspecting the message text. Layer 1 of the fix.
+_CREDENTIAL_PATTERNS = re.compile(
+    r"missing credentials|api_key|could not locate credentials|"
+    r"access denied|unrecognized client|invalid api key|no credentials",
+    re.IGNORECASE,
+)
+
 
 def _is_unrecoverable(exc: Exception) -> bool:
-    return getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS
+    if getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS:
+        return True
+    # Message-level check: litellm reports config errors as 500 — we detect
+    # them by content so they don't burn the full retry budget.
+    return bool(_CREDENTIAL_PATTERNS.search(str(exc)))
 
+
+# Layer 2: regardless of how misclassification may evolve, cap the total time
+# any single call can spend retrying. This bounds damage from future cases we
+# haven't anticipated — a tighter safety net than any per-pattern fix.
+_MAX_TOTAL_RETRY_SECONDS = 60
 
 _MAX_BACKOFF_SECONDS = 30
 
@@ -92,6 +110,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
     _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
+    t_start = time.perf_counter()
     for i in range(max_retries):
         try:
             if use_openai_sdk:
@@ -121,6 +140,10 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 raise LLMConfigError(f"LLM rejected the request: {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
+                if time.perf_counter() - t_start >= _MAX_TOTAL_RETRY_SECONDS:
+                    raise LLMUnavailableError(
+                        f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
+                    ) from e
                 time.sleep(_backoff_seconds(i))
             else:
                 raise LLMUnavailableError(
@@ -137,6 +160,7 @@ async def llm_acompletion(model, prompt):
     _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
+    t_start = time.perf_counter()
     for i in range(max_retries):
         try:
             if use_openai_sdk:
@@ -162,6 +186,10 @@ async def llm_acompletion(model, prompt):
                 raise LLMConfigError(f"LLM rejected the request: {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
+                if time.perf_counter() - t_start >= _MAX_TOTAL_RETRY_SECONDS:
+                    raise LLMUnavailableError(
+                        f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
+                    ) from e
                 await asyncio.sleep(_backoff_seconds(i))
             else:
                 raise LLMUnavailableError(
