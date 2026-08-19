@@ -135,3 +135,20 @@
 - Step 3 (import): `ok`.
 
 **Lesson learned:** Exponential backoff is not safe to add without a total-time budget guard. Backoff buys time for transient conditions to clear; without a ceiling, it transforms every permanent error into a slow guaranteed failure. The pattern is: fast classification (Layer 1) + time ceiling (Layer 2), never backoff alone.
+
+#### [follow-up] Fix: clamp retry sleep to remaining budget (llm_completion + llm_acompletion)
+
+**What:** In both `llm_completion` and `llm_acompletion` (pageindex/utils.py), replaced the `time.perf_counter() - t_start >= _MAX_TOTAL_RETRY_SECONDS` pre-sleep guard with a `remaining` calculation that is then used to clamp the sleep: `min(_backoff_seconds(i), remaining)`. If remaining <= 0 the budget error is raised immediately instead.
+
+**Why:** The original guard checked elapsed time *before* sleeping, but did not constrain the sleep duration itself. With a 5s budget and a 16s backoff draw (possible given `_MAX_BACKOFF_SECONDS = 30`), the retry loop could legitimately enter the sleep while budget still remained, sleep for 16s, and exit 11s past budget. With real values (budget=60s, max backoff=30s) worst-case overrun is ~50%. A budget that can be exceeded by 50% provides no reliable bound on Lambda execution time.
+
+**Lesson learned:** Elapsed-time checks placed *before* a blocking operation do not bound the operation itself. The only correct pattern is to compute remaining budget, raise immediately if exhausted, and pass `min(desired_duration, remaining)` to the sleep call. This guarantees the total wall-clock time is bounded by `budget + one API call duration` — the tightest possible bound short of interrupting an in-flight request.
+
+**Alternatives considered:** (1) Interrupt the sleep with a threading.Timer / asyncio.wait_for — more complex and unnecessary since we only need to bound total time, not cancel mid-sleep precisely. (2) Keep the pre-sleep check and add a post-sleep check — still permits the overrun; just detects it one iteration later.
+
+**Files touched:** pageindex/utils.py
+
+**Verification output:**
+- sync:  `LLMUnavailableError | 5.0 s`
+- async: `LLMUnavailableError | 5.0 s`
+- import smoke test: `ok`

@@ -140,11 +140,14 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 raise LLMConfigError(f"LLM rejected the request: {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                if time.perf_counter() - t_start >= _MAX_TOTAL_RETRY_SECONDS:
+                remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
+                # Clamp sleep to remaining budget: the elapsed-time check alone permits
+                # an overrun of up to one full backoff interval if budget expires during sleep.
+                if remaining <= 0:
                     raise LLMUnavailableError(
                         f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
                     ) from e
-                time.sleep(_backoff_seconds(i))
+                time.sleep(min(_backoff_seconds(i), remaining))
             else:
                 raise LLMUnavailableError(
                     f"LLM unavailable after {max_retries} attempts: {e}"
@@ -186,11 +189,14 @@ async def llm_acompletion(model, prompt):
                 raise LLMConfigError(f"LLM rejected the request: {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                if time.perf_counter() - t_start >= _MAX_TOTAL_RETRY_SECONDS:
+                remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
+                # Clamp sleep to remaining budget: the elapsed-time check alone permits
+                # an overrun of up to one full backoff interval if budget expires during sleep.
+                if remaining <= 0:
                     raise LLMUnavailableError(
                         f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
                     ) from e
-                await asyncio.sleep(_backoff_seconds(i))
+                await asyncio.sleep(min(_backoff_seconds(i), remaining))
             else:
                 raise LLMUnavailableError(
                     f"LLM unavailable after {max_retries} attempts: {e}"
