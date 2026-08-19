@@ -203,17 +203,18 @@ async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
 
     async def run(ordinal):
         async with semaphore:
-            # Render inside the semaphore, not before it: otherwise every coroutine rasterizes
-            # up front and the whole document sits in memory as PIL images (~6.5 MB per page at
-            # 150 DPI). This bounds it to `concurrency` images. Rendering blocks the loop for
-            # ~0.042s, which is why it can stay here.
-            image = doc[ordinal - 1].render(scale=dpi / 72).to_pil()
             try:
+                # Render inside the semaphore, not before it: otherwise every coroutine rasterizes
+                # up front and the whole document sits in memory as PIL images (~6.5 MB per page at
+                # 150 DPI). This bounds it to `concurrency` images. Rendering blocks the loop for
+                # ~0.042s, which is why it can stay here.
+                image = doc[ordinal - 1].render(scale=dpi / 72).to_pil()
                 results[ordinal] = await asyncio.to_thread(_ocr_image, image, lang, psm)
             except Exception as e:
-                # Broad on purpose: one page must never take the document down. exc_info keeps
-                # the traceback so a systematic bug is still diagnosable from the logs.
-                logging.warning(f"OCR failed on page {ordinal}: {e}", exc_info=True)
+                # Broad on purpose: one page must never take the document down — covers both
+                # render failures (pdfium) and OCR failures (tesseract). exc_info keeps the
+                # traceback so a systematic bug is still diagnosable from the logs.
+                logging.warning(f"Render/OCR failed on page {ordinal}: {e}", exc_info=True)
 
     await asyncio.gather(*(run(o) for o in ordinals))
     return results

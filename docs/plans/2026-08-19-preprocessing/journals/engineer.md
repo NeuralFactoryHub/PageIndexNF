@@ -248,3 +248,26 @@ DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf 29 1 []
 Password-protected PDF: not verifiable — no PDF encryption library (pypdf, pikepdf) available in the venv, and `uv add` is disallowed per session constraints. The password-detection branch (`"password" in msg_lower`) was not exercised end-to-end.
 
 **Files touched:** `pageindex/preprocess.py`, `FORK_NOTES.md`, `docs/plans/2026-08-19-preprocessing/journals/engineer.md`
+
+---
+
+#### [QA-fix-2] Task: Move render inside try — render failure kills whole document
+
+**What:** Moved `doc[ordinal - 1].render(scale=dpi / 72).to_pil()` inside the existing `try` block in `_ocr_pages()`'s `run()` coroutine. The render was sitting outside the `try`, meaning a `PdfiumError` (or any exception) on render propagated uncaught through `asyncio.gather`, aborting the entire document instead of treating the page as a single failure. Updated the `except` comment to say it covers "render AND OCR failures", not just OCR. Kept the memory-bounding comment (render inside semaphore) accurate by placing it on the line it describes.
+
+**Why:** The docstring above `run()` states "one page must never take the document down" and the partial-failure design commits to: failed pages yield `""`, land in `report.failed_pages`, document continues. The uncovered render call directly contradicted both. Because `asyncio.gather` propagates the first unhandled exception from any coroutine, a single page with a corrupt image stream would kill every other in-flight OCR coroutine and raise out of `preprocess()` — as a raw `PdfiumError`, not a `PageIndexError` subclass. Two bugs in one: wrong partial-failure behavior AND a second escape from the typed hierarchy.
+
+**Alternatives considered:** Wrapping the render in a nested `try` separate from the OCR `try` — rejected; it adds indentation with no benefit. Both render and OCR failures should produce the same outcome (page skipped, warning logged), so one `try` covering both is the right shape.
+
+**Verification output:**
+```
+completed: 36 pages | ocr: 3 | failed: [5]
+page 5 empty: True
+Lube Duvri.pdf 36 4 []
+DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf 29 1 []
+```
+Forced a `RuntimeError` on page 5's render via monkeypatch. Document completed, failed ordinal in `failed_pages`, page text is `""`. Regression clean.
+
+**Note on monkeypatching:** `import pageindex.preprocess as p` resolves to the `preprocess` function (not the module) because `pageindex/__init__.py` does `from .preprocess import preprocess`, shadowing the submodule attribute. The actual module is reachable via `sys.modules['pageindex.preprocess']`.
+
+**Files touched:** `pageindex/preprocess.py`
