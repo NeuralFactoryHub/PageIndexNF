@@ -17,6 +17,8 @@ dependencies = [
     "regex>=2024.0.0",
     "sortedcontainers==2.4.0",
     "boto3",
+    "pytesseract==0.3.13",
+    "Pillow>=10.0.0",
 ]
 
 [tool.setuptools.packages.find]

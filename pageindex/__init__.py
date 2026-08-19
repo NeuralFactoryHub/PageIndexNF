@@ -4,3 +4,16 @@ from .retrieve import get_document, get_document_structure, get_page_content
 from .client import PageIndexClient
 from .tree_optimize import optimize_tree
 from .build_tree import build_tree
+from .preprocess import preprocess, Normalized, PreprocessReport
+from .errors import (
+    PageIndexError,
+    UnreadableInputError,
+    UnsupportedFormatError,
+    ConversionError,
+    OCRError,
+    NotPreprocessedError,
+    MissingSystemDependencyError,
+    LLMUnavailableError,
+    LLMConfigError,
+    TreeParseError,
+)
