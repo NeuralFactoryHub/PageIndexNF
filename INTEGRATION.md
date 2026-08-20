@@ -185,16 +185,3 @@ If you are upgrading an existing integration:
 3. **Telemetry no longer writes to `./logs`.** Pass `log_dir="/tmp/pageindex"` to re-enable it.
    Lambda's filesystem is read-only outside `/tmp`.
 4. **`doc_name` is honoured.** Previously trees built from page text were all named `Untitled`.
-
----
-
-## 7. Known limitations
-
-- A document whose table of contents spans more than one page can fail with
-  `Failed to complete TOC transformation after maximum retries`. This is an upstream defect in
-  the TOC continuation loop, reachable now that fully-scanned documents are indexable. Fix in
-  progress.
-- OCR output is good enough to build a tree and summarise from, not clean enough to quote
-  verbatim to an end user. Expect artefacts (`secondolaprevisione`, mangled dot leaders).
-- OCR replaces a page's text rather than augmenting it, and only runs on pages classified as
-  scanned. A born-digital page with a bad text layer is not repaired.
