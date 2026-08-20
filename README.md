@@ -238,6 +238,17 @@ To address this, we introduced PageIndex OCR — the first long-context OCR mode
 
 ## Preprocessing (fork addition)
 
+### Installing
+
+```bash
+uv add "git+https://github.com/NeuralFactoryHub/PageIndexNF.git@feature/customizations"
+```
+
+`feature/customizations` is this fork's production branch and the only ref consumers should
+pin. Feature branches are merged into it; they are never installed directly.
+
+### Usage
+
 Documents are normalized before indexing. Always call `preprocess()` first:
 
 ```python
@@ -247,12 +258,28 @@ norm = preprocess(raw_bytes, filename="Disposizioni ingresso.pdf")
 tree = build_tree(pages=norm.pages, doc_name=norm.doc_name)
 
 norm.pages    # per-page text; index = page number - 1
-norm.report   # source_format, page_count, text_pages, ocr_pages, failed_pages, chars_extracted
+norm.doc_name # original filename, carried through to tree["doc_name"]
+norm.report   # source_format, page_count, text_pages, ocr_pages, failed_pages,
+              # chars_extracted, convert_seconds, classify_seconds, ocr_seconds
 ```
 
 `preprocess()` converts Office files to PDF, detects scanned pages, and OCRs only those.
 Page positions are never compacted: a page whose OCR failed holds `""` and its number appears
 in `report.failed_pages`, so page numbers stay aligned with the source document.
+
+### Calling from async code
+
+`preprocess()` is synchronous and runs its own event loop internally (`asyncio.run`). Calling
+it from inside a running loop — an `async def` FastAPI route, for example — raises
+`RuntimeError: asyncio.run() cannot be called from a running event loop`.
+
+```python
+# async route
+norm = await asyncio.to_thread(preprocess, raw_bytes, filename=name)
+```
+
+A synchronous `def` route needs no wrapper: FastAPI already runs it in a threadpool.
+`build_tree()` is synchronous too and blocks for tens of seconds; offload it the same way.
 
 ### Required system binaries
 
@@ -274,6 +301,12 @@ import litellm
 litellm.success_callback = ["langfuse"]
 litellm.failure_callback = ["langfuse"]
 ```
+
+**Pin `langfuse<3`.** `litellm 1.84.0` initialises the Langfuse callback against the v2 SDK;
+with `langfuse` 4.x it raises `AttributeError: module 'langfuse' has no attribute 'version'`,
+and with the package absent, `ModuleNotFoundError`. Either error propagates out of the model
+call, so **indexing fails, not just telemetry**. An unpinned `pip install langfuse` resolves
+to 4.x. Verified working: `langfuse==2.60.10`.
 
 To group the many calls of one document into a single trace, pass metadata through:
 
