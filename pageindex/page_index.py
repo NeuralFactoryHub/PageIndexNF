@@ -393,6 +393,7 @@ def toc_transformer(toc_content, model=None):
         ],
     }
     You should transform the full table of contents in one go.
+    Include ALL entries present in the raw text — even unnumbered ones such as appendices, annexes, references, or prefaces — and set structure to null for those.
     Directly return the final JSON structure, do not output anything else. """
 
     prompt = init_prompt + '\n Given table of contents\n:' + _secure_doc_text(toc_content)

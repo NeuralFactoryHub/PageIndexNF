@@ -200,6 +200,46 @@ Same fix applied to both `extract_toc_content` and `toc_transformer` in `page_in
 
 **Status:** DONE
 
+### 10a. Fix `toc_transformer` dropping unnumbered TOC entries (e.g. "Allegati / Annex")
+**Why:** The `init_prompt` described `structure` as "the numeric system which represents the index
+of the hierarchy section". The model inferred its scope was numbered sections only and consistently
+dropped trailing unnumbered entries (bare labels with no number, no page, no dot leader) such as
+`Allegati / Annex` common in Italian safety documents. `check_if_toc_transformation_is_complete`
+then correctly rejected the output, causing every retry to reproduce the same omission and
+eventually raising `TreeParseError` after maximum retries. This is independent of the
+continuation-loop bug fixed in §10.
+
+**Root cause confirmed by:** three controlled experiments by the debugger — feeding only the
+2305-char TOC page reproduced the same 15-entry output, ruling out input-selection as the cause.
+
+**Fix:** one sentence added after "You should transform the full table of contents in one go."
+in `toc_transformer`'s `init_prompt`:
+> Include ALL entries present in the raw text — even unnumbered ones such as appendices, annexes,
+> references, or prefaces — and set structure to null for those.
+
+**Verified on:**
+- Target (51-page DUVRI DL01_Toffetti.pdf): completes end-to-end, wall=103s, no `TreeParseError`.
+  Tree has 9 top-level nodes. No explicit Allegati node visible in printed tree — the unnumbered
+  entry appears to be absorbed by the large-node `process_no_toc` sub-path that fires on the
+  section spanning pages 15–42 (100% accuracy there). Downstream page-assignment for null-page
+  entries warrants a follow-up audit (see downstream risk note below).
+- Regression 1 (DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf): 10 top-level nodes,
+  `[24-29] ALLEGATI` present, 100% accuracy. Unchanged.
+- Regression 2 (BRIVAPLAST.docx, no-TOC path): 1 top-level node `[1-2] INFO PER GESTIONE DUVRI`,
+  100% accuracy. Unchanged.
+
+**Downstream risk (open):** a TOC entry with `page: null` (unnumbered entry without a page number)
+feeds `process_toc_with_page_numbers` → `convert_page_to_int` → page-assignment logic. If that
+path silently drops or misassigns such entries they will not appear as nodes in the final tree. On
+the Toffetti document the Allegati entry is not visible as a distinct top-level node — likely
+swallowed by the sub-path restructuring, not surfaced as a wrong-page node. Needs explicit audit on
+a document where the unnumbered entry IS the only terminal node so the drop would be unambiguous.
+
+**`extract_toc_content` assessment:** its prompt says "extract the full table of contents" without
+numeric-only language and operates at raw-text level (no JSON schema). No gap found; no change made.
+
+**Status:** DONE (prompt fix); downstream null-page handling open for audit.
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired
