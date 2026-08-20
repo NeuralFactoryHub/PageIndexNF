@@ -166,6 +166,40 @@ OpenAI SDK directly, so neither callbacks nor `llm_metadata` reach it. The sympt
 silently vanishing, not an error. Prefixed models (`bedrock/...`, `anthropic/...`) are unaffected.
 **Status:** DONE
 
+**Extended (2026-08-20 — generation naming):** All litellm calls were labeled `litellm-completion`
+(litellm's default), making Langfuse traces with ~40 generations per document unreadable.
+Inside `llm_completion` and `llm_acompletion` (litellm branches only, not OpenAI SDK), derive
+`generation_name` from `sys._getframe(1).f_code.co_name` — the name of the upstream function that
+called into the fork's wrapper. The ContextVar dict is **copied** before adding the key; mutating
+it in place would leak one call's name into every subsequent call for that document. Consumer's
+own `generation_name` wins if already present. No upstream file edits required — new call sites
+are named automatically.
+
+Verified: 34 calls on a 2-page docx produced 5 distinct names
+(`check_title_appearance`, `check_title_appearance_in_start`, `toc_detector_single_page`,
+`generate_toc_init`, `generate_node_summary`); `trace_id` intact on all 34.
+
+### 10. Fix TOC continuation loop — separate truncation from finished-but-rejected
+**Why:** `toc_transformer` and `extract_toc_content` entered a "continue from where you left off"
+loop whenever the checker said the output was incomplete, regardless of whether the model had
+actually been truncated (`finish_reason == 'max_output_reached'`) or had finished normally
+(`finish_reason == 'finished'`). Asking a model to continue a **complete** JSON makes it emit a
+second, separate JSON object; concatenating that onto the first produces malformed input that the
+checker correctly rejects forever. Measured on a 51-page document: 6 calls, all
+`finish_reason='finished'`, all `if_complete='no'`, accumulated chars 2365 → 1414 → 141 → 41 → 41
+→ 41 (41 = `{"table_of_contents": []}`), then raised bare `Exception`.
+
+**Do:**
+- `finish_reason == 'max_output_reached'` (truncated): keep existing continuation loop unchanged.
+- `finish_reason == 'finished'` + checker says no: fresh single-shot retries of the original
+  prompt (no chat history, no concatenation), up to 5 attempts.
+- Bare `Exception` on retry exhaustion replaced by `TreeParseError` (already imported) so
+  consumers can distinguish structured failures from bugs.
+
+Same fix applied to both `extract_toc_content` and `toc_transformer` in `page_index.py`.
+
+**Status:** DONE
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired
