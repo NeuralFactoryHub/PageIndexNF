@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import sys
 import textwrap
 from datetime import datetime
 import time
@@ -144,12 +145,17 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                 )
             else:
                 import litellm
+                # Copy before mutating — the ContextVar value is shared across all calls of a
+                # document run; mutating in place would leak this call's name into every subsequent call.
+                _meta = dict(_llm_metadata.get() or {})
+                if "generation_name" not in _meta:
+                    _meta["generation_name"] = sys._getframe(1).f_code.co_name
                 response = litellm.completion(
                     model=model,
                     messages=messages,
                     temperature=0,
                     drop_params=True,
-                    metadata=_llm_metadata.get() or {},
+                    metadata=_meta,
                 )
             content = response.choices[0].message.content
             if return_finish_reason:
@@ -198,12 +204,16 @@ async def llm_acompletion(model, prompt):
                 )
             else:
                 import litellm
+                # Copy before mutating — same rationale as llm_completion.
+                _meta = dict(_llm_metadata.get() or {})
+                if "generation_name" not in _meta:
+                    _meta["generation_name"] = sys._getframe(1).f_code.co_name
                 response = await litellm.acompletion(
                     model=model,
                     messages=messages,
                     temperature=0,
                     drop_params=True,
-                    metadata=_llm_metadata.get() or {},
+                    metadata=_meta,
                 )
             return response.choices[0].message.content
         except Exception as e:
