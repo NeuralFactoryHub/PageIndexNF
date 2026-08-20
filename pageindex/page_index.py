@@ -249,13 +249,24 @@ def extract_toc_content(content, model=None):
     if_complete = check_if_toc_transformation_is_complete(content, response, model)
     if if_complete == "yes" and finish_reason == "finished":
         return response
-    
+
+    if finish_reason == "finished":
+        # Model finished normally but checker rejected the output — fresh retries, no
+        # concatenation (continuing a complete response produces a second JSON object).
+        for _ in range(5):
+            response, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+            if_complete = check_if_toc_transformation_is_complete(content, response, model)
+            if if_complete == "yes" and finish_reason == "finished":
+                return response
+        raise TreeParseError('Failed to complete table of contents extraction after maximum retries')
+
+    # finish_reason == 'max_output_reached': response was truncated — continue from partial.
     chat_history = [
-        {"role": "user", "content": prompt}, 
-        {"role": "assistant", "content": response},    
+        {"role": "user", "content": prompt},
+        {"role": "assistant", "content": response},
     ]
     continue_prompt = "please continue the generation of table of contents, directly output the remaining part of the structure"
-    
+
     max_attempts = 5
     for attempt in range(max_attempts):
         new_response, finish_reason = llm_completion(model=model, prompt=continue_prompt, chat_history=chat_history, return_finish_reason=True)
@@ -266,8 +277,8 @@ def extract_toc_content(content, model=None):
         if if_complete == "yes" and finish_reason == "finished":
             break
     else:
-        raise Exception('Failed to complete table of contents extraction after maximum retries')
-    
+        raise TreeParseError('Failed to complete table of contents extraction after maximum retries')
+
     return response
 
 def detect_page_index(toc_content, model=None):
@@ -382,6 +393,7 @@ def toc_transformer(toc_content, model=None):
         ],
     }
     You should transform the full table of contents in one go.
+    Include ALL entries present in the raw text — even unnumbered ones such as appendices, annexes, references, or prefaces — and set structure to null for those.
     Directly return the final JSON structure, do not output anything else. """
 
     prompt = init_prompt + '\n Given table of contents\n:' + _secure_doc_text(toc_content)
@@ -391,7 +403,20 @@ def toc_transformer(toc_content, model=None):
         last_complete = extract_json(last_complete)
         cleaned_response = convert_page_to_int(last_complete.get('table_of_contents', []))
         return cleaned_response
-    
+
+    if finish_reason == "finished":
+        # Model finished normally but checker rejected the output — fresh retries, no
+        # concatenation (continuing a complete JSON produces a second object that breaks parsing).
+        for _ in range(5):
+            last_complete, finish_reason = llm_completion(model=model, prompt=prompt, return_finish_reason=True)
+            if_complete = check_if_toc_transformation_is_complete(toc_content, last_complete, model)
+            if if_complete == "yes" and finish_reason == "finished":
+                last_complete = extract_json(last_complete)
+                cleaned_response = convert_page_to_int(last_complete.get('table_of_contents', []))
+                return cleaned_response
+        raise TreeParseError('Failed to complete TOC transformation after maximum retries')
+
+    # finish_reason == 'max_output_reached': response was truncated — continue from partial.
     last_complete = get_json_content(last_complete)
     chat_history = [
         {"role": "user", "content": prompt},
@@ -419,7 +444,7 @@ def toc_transformer(toc_content, model=None):
         if if_complete == "yes" and finish_reason == "finished":
             break
     else:
-        raise Exception('Failed to complete TOC transformation after maximum retries')
+        raise TreeParseError('Failed to complete TOC transformation after maximum retries')
 
     last_complete = extract_json(last_complete)
 
