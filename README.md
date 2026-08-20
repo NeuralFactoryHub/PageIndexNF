@@ -13,6 +13,11 @@
 
 # PageIndex: Vectorless, Reasoning-based RAG
 
+> **This is a fork.** If you are integrating PageIndexNF into a backend, read
+> **[INTEGRATION.md](INTEGRATION.md)** instead of this file — the instructions below are
+> upstream's script-oriented workflow and do not apply.
+
+
 <p align="center"><b>Reasoning-based RAG&nbsp; ◦ &nbsp;No Vector DB, No Chunking&nbsp; ◦ &nbsp;Context-Aware Retrieval&nbsp; ◦ &nbsp;Reads Like a Human</b></p>
 
 <h4 align="center">
@@ -236,120 +241,13 @@ To address this, we introduced PageIndex OCR — the first long-context OCR mode
 
 ---
 
-## Preprocessing (fork addition)
+## Fork additions
 
-### Installing
+This fork adds document preprocessing (OCR for scanned pages, Office conversion), a typed error
+taxonomy, and observability pass-through. **Consumers: read [INTEGRATION.md](INTEGRATION.md)** —
+it is the complete integration guide and supersedes the upstream usage instructions above.
 
-```bash
-uv add "git+https://github.com/NeuralFactoryHub/PageIndexNF.git@feature/customizations"
-```
-
-`feature/customizations` is this fork's production branch and the only ref consumers should
-pin. Feature branches are merged into it; they are never installed directly.
-
-### Usage
-
-Documents are normalized before indexing. Always call `preprocess()` first:
-
-```python
-from pageindex import preprocess, build_tree
-
-norm = preprocess(raw_bytes, filename="Disposizioni ingresso.pdf")
-tree = build_tree(pages=norm.pages, doc_name=norm.doc_name)
-
-norm.pages    # per-page text; index = page number - 1
-norm.doc_name # original filename, carried through to tree["doc_name"]
-norm.report   # source_format, page_count, text_pages, ocr_pages, failed_pages,
-              # chars_extracted, convert_seconds, classify_seconds, ocr_seconds
-```
-
-`preprocess()` converts Office files to PDF, detects scanned pages, and OCRs only those.
-Page positions are never compacted: a page whose OCR failed holds `""` and its number appears
-in `report.failed_pages`, so page numbers stay aligned with the source document.
-
-`ocr_lang` defaults to `"eng"`. Pass a different value to match your document language
-(e.g. `ocr_lang="ita"`); the matching `tesseract-ocr-<lang>` pack must be installed. A wrong
-value degrades OCR silently — Tesseract returns plausible text without raising.
-
-### Calling from async code
-
-`preprocess()` is synchronous and runs its own event loop internally (`asyncio.run`). Calling
-it from inside a running loop — an `async def` FastAPI route, for example — raises
-`RuntimeError: asyncio.run() cannot be called from a running event loop`.
-
-```python
-# async route
-norm = await asyncio.to_thread(preprocess, raw_bytes, filename=name)
-```
-
-A synchronous `def` route needs no wrapper: FastAPI already runs it in a threadpool.
-`build_tree()` is synchronous too and blocks for tens of seconds; offload it the same way.
-
-### Required system binaries
-
-The library asserts these; it cannot install them.
-
-```dockerfile
-RUN apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd libreoffice
-```
-
-Add one `tesseract-ocr-<lang>` pack per language you intend to OCR and pass the matching
-`ocr_lang` to `preprocess()`. A wrong or missing pack degrades OCR silently — Tesseract
-returns plausible text in the correct alphabet without raising.
-
-Both are too heavy for a zip Lambda layer. Use a container-image Lambda.
-
-### Observability
-
-The fork does not depend on any tracing vendor. Enable one from the outside — litellm's callbacks
-are process-global, and the fork's model calls go through litellm:
-
-```python
-import litellm
-litellm.success_callback = ["langfuse"]
-litellm.failure_callback = ["langfuse"]
-```
-
-**Pin `langfuse<3`.** `litellm 1.84.0` initialises the Langfuse callback against the v2 SDK;
-with `langfuse` 4.x it raises `AttributeError: module 'langfuse' has no attribute 'version'`,
-and with the package absent, `ModuleNotFoundError`. Either error propagates out of the model
-call, so **indexing fails, not just telemetry**. An unpinned `pip install langfuse` resolves
-to 4.x. Verified working: `langfuse==2.60.10`.
-
-To group the many calls of one document into a single trace, pass metadata through:
-
-```python
-tree = build_tree(
-    pages=norm.pages,
-    doc_name=norm.doc_name,
-    llm_metadata={"trace_id": case_id, "trace_name": f"index:{norm.doc_name}", "tags": ["indexing"]},
-)
-```
-
-**Known gap:** a model identifier with no provider prefix (e.g. `gpt-4o-2024-11-20`) is dispatched
-through the OpenAI SDK directly, bypassing litellm — so neither the callbacks nor `llm_metadata`
-apply to it. Prefixed models (`bedrock/...`, `anthropic/...`, `litellm/...`) go through litellm and
-are fully traced. This is silent: metrics simply stop appearing.
-
-### Which errors to retry
-
-| Error | Retry? |
-|---|---|
-| `LLMUnavailableError` | **Yes** — throttling or transport. Exponential backoff. |
-| `LLMConfigError` | No — bad key or missing model. |
-| `TreeParseError` | No — deterministic; retrying only spends time. |
-| `UnreadableInputError` and subclasses | No — the document must be fixed or re-uploaded. |
-| `MissingSystemDependencyError` | No — fix the runtime image. |
-
-### Breaking changes
-
-- The LLM retry loop used to return `""` after exhausting its attempts; it now raises
-  `LLMUnavailableError`. Documents that previously indexed badly-but-successfully will start
-  failing loudly. **This is the intent.**
-- `build_tree(source=...)` now raises `NotPreprocessedError` for a PDF with no text layer
-  instead of producing an empty tree.
-- Telemetry no longer writes to `./logs` by default. Pass `log_dir="/tmp/pageindex"` to
-  re-enable it.
+See [FORK_NOTES.md](FORK_NOTES.md) for every divergence from upstream and its rationale.
 
 ---
 
