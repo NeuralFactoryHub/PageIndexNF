@@ -122,6 +122,14 @@ budget still remaining (`min(backoff, remaining)`), so the budget holds exactly 
 overrun by up to one backoff interval. Verified: a 3 s budget returns at 3.01 s, an 8 s budget at
 8.00 s. The clamp is the load-bearing half — it bounds any future misclassification the message
 matching does not anticipate.
+
+**2026-08-20 hardening:** `_is_unrecoverable` now also type-checks for `ImportError`,
+`AttributeError`, and `TypeError` before any message inspection. Motivated by two real failures
+(`ModuleNotFoundError: No module named 'langfuse'` and `AttributeError: module 'langfuse' has no
+attribute 'version'`) that burned the full 60 s retry budget because neither carries a status code
+nor reads like a credential error. Type-matching is independent of how litellm wraps the message
+and keeps vendor names out of our code. `_CREDENTIAL_PATTERNS` renamed `_UNRECOVERABLE_PATTERNS`
+to reflect its broadened scope.
 **Status:** DONE
 
 ### 7. Configurable `log_dir` — telemetry off by default

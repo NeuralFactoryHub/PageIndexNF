@@ -82,7 +82,7 @@ _UNRECOVERABLE_STATUS = frozenset({401, 403, 404})
 # the misclassification by inspecting the message text. Layer 1 of the fix.
 # STS-specific phrases cover expired/invalid session tokens from assume-role;
 # these arrive as 400/500 from Bedrock and would otherwise burn the full budget.
-_CREDENTIAL_PATTERNS = re.compile(
+_UNRECOVERABLE_PATTERNS = re.compile(
     r"missing credentials|api_key|could not locate credentials|"
     r"access denied|unrecognized client|invalid api key|no credentials|"
     r"security token|ExpiredToken|UnrecognizedClientException",
@@ -91,11 +91,17 @@ _CREDENTIAL_PATTERNS = re.compile(
 
 
 def _is_unrecoverable(exc: Exception) -> bool:
+    # Program- or environment-level errors: an absent module, a missing
+    # attribute, a wrong type. No retry can install a package or fix a
+    # version mismatch — matching by type keeps this independent of how
+    # litellm wraps or reformats the message text.
+    if isinstance(exc, (ImportError, AttributeError, TypeError)):
+        return True
     if getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS:
         return True
     # Message-level check: litellm reports config errors as 500 — we detect
     # them by content so they don't burn the full retry budget.
-    return bool(_CREDENTIAL_PATTERNS.search(str(exc)))
+    return bool(_UNRECOVERABLE_PATTERNS.search(str(exc)))
 
 
 # Layer 2: regardless of how misclassification may evolve, cap the total time
@@ -152,7 +158,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             return content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise LLMConfigError(f"LLM rejected the request: {e}") from e
+                raise LLMConfigError(f"LLM call failed permanently (bad config or environment): {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
                 remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
@@ -202,7 +208,7 @@ async def llm_acompletion(model, prompt):
             return response.choices[0].message.content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise LLMConfigError(f"LLM rejected the request: {e}") from e
+                raise LLMConfigError(f"LLM call failed permanently (bad config or environment): {e}") from e
             logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
                 remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
