@@ -195,7 +195,7 @@ cd ~/CursorProjects/PageIndexNF
 set -a; source <path to the backend .env>; set +a
 export AWS_REGION_NAME="${AWS_REGION_NAME:-$AWS_REGION}"   # litellm/bedrock reads AWS_REGION_NAME
 
-.venv/bin/python <e2e_check.py> "<document>" "bedrock/$ANALISTA_MAIN_MODEL"
+.venv/bin/python examples/e2e_check.py "<document>" "bedrock/$ANALISTA_MAIN_MODEL"
 ```
 
 Run from the repo root: the script prepends `os.getcwd()` to `sys.path`, so from anywhere else it
@@ -204,9 +204,8 @@ would import an installed `pageindex` instead of the checkout under test.
 The `bedrock/` prefix is required: an unprefixed model id is dispatched through the OpenAI SDK,
 bypassing litellm — so neither Bedrock credentials, the callbacks, nor `llm_metadata` apply.
 
-**The verification script has no home.** It lives in the session scratchpad, a temporary directory
-that is deleted on reboot. Everything in this document was produced by it and none of it is
-reproducible once it is gone. It needs a place in `examples/`.
+The script lives at `examples/e2e_check.py`. `E2E_OCR_LANG` defaults to `"ita"` there — it
+emulates a consumer passing its own language, since the library's default is `"eng"`.
 
 ## 10. Still unverified
 
