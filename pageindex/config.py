@@ -20,4 +20,6 @@ DEFAULT_CONFIG = {
     "if_add_node_summary": "yes",
     "if_add_doc_description": "no",
     "if_add_node_text": "no",
+    "log_dir": None,         # None = telemetry off; set a writable path to enable (e.g. "/tmp/pageindex")
+    "llm_metadata": None,    # dict forwarded verbatim to litellm (e.g. Langfuse trace_id/tags)
 }

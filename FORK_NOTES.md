@@ -72,6 +72,100 @@ carries no discriminative signal, so the node-distinctive content starts a few t
 (minor cost for retrieval/embedding). The core goals of #3 hold — section-scoped (not
 whole-document) content, source-language output, no upstream meta-preamble.
 
+### 4. Document preprocessing — `pageindex/preprocess.py`
+**Why:** upstream indexes only born-digital PDFs. Real client documents arrive as scanned PDFs
+and Office files. Scanned pages return empty text from `extract_text()`, so without OCR the tree
+is built from blank pages and looks valid. OCR must run before tree building, not as a downstream
+step, because section headings only exist as pixels in scanned annexes — a tree built from the
+text layer loses the structural boundaries exactly where the annexes begin. `preprocess.py` is
+isolated (like `build_tree.py`) so upstream merges do not conflict.
+**Status:** DONE
+
+**Extended (2026-08-20 — scope fix):** `OCR_LANG` default changed from `"ita"` to `"eng"`.
+The Italian default was inherited from the first consumer and violated the generic-repo scope
+rule (see preamble). Consumers targeting non-English documents must pass `ocr_lang` explicitly.
+
+### 5. Typed error taxonomy — `pageindex/errors.py`
+**Why:** upstream raises bare `Exception` everywhere and returns `""` on LLM exhaustion. Both
+collapse unrelated causes into one indistinguishable symptom. A caller cannot tell a broken
+document from a throttled model and cannot decide whether retrying is sensible. The typed
+hierarchy makes that distinction part of the public contract: only `LLMUnavailableError` is
+worth a retry.
+**Status:** DONE
+
+**Extended (2026-08-19 — bug fix):** `pdfium.PdfDocument()` in `_classify()` raised `PdfiumError`
+(not a `PageIndexError` subclass) on zero-byte, corrupt, and password-protected PDFs, breaking the
+typed contract for those inputs. Fixed by wrapping the constructor call in `_classify()` and
+re-raising as `UnreadableInputError(...) from e`. Password-protected inputs are distinguished in
+the message ("PDF is encrypted — provide an unlocked copy") so the consumer can act on the
+specific cause. No new exception class introduced; the message on `UnreadableInputError` carries
+the distinction. `_classify()` gains a `doc_name` parameter (one call site updated in
+`preprocess()`) so the error carries the filename.
+
+### 6. LLM retry raises `LLMUnavailableError` instead of returning `""`
+**Why:** returning `""` on exhaustion let transient throttling be reported as a broken document —
+a silent, wrong result that wasted the full retry budget before appearing. Raising a typed error
+lets the caller see the cause immediately and decide whether to retry. This is a deliberate
+breaking change: documents that previously indexed badly-but-successfully now fail loudly.
+
+The retry loop also replaces flat 1 s sleeps with exponential backoff (full jitter) bounded by a
+wall-clock budget (`_MAX_TOTAL_RETRY_SECONDS`, 60 s). The backoff alone made permanent failures far
+more expensive than the flat sleep it replaced: a permanent error that slips past
+`_is_unrecoverable` runs the whole series, `1+2+4+8+16+30+30+30+30 ≈ 151 s` worst case, against
+9 s before. Measured with no credentials configured, that path took ~150 s — 15× the old cost, on a
+Lambda where every failing call competes for one 890 s invocation.
+
+Two layers bound it. `_is_unrecoverable` also matches the exception *message*, because litellm
+reports missing credentials as `InternalServerError` with status 500 and a genuine 500 must stay
+retryable — the status code alone cannot separate them. Independently, each sleep is clamped to the
+budget still remaining (`min(backoff, remaining)`), so the budget holds exactly rather than being
+overrun by up to one backoff interval. Verified: a 3 s budget returns at 3.01 s, an 8 s budget at
+8.00 s. The clamp is the load-bearing half — it bounds any future misclassification the message
+matching does not anticipate.
+
+**2026-08-20 hardening:** `_is_unrecoverable` now also type-checks for `ImportError`,
+`AttributeError`, and `TypeError` before any message inspection. Motivated by two real failures
+(`ModuleNotFoundError: No module named 'langfuse'` and `AttributeError: module 'langfuse' has no
+attribute 'version'`) that burned the full 60 s retry budget because neither carries a status code
+nor reads like a credential error. Type-matching is independent of how litellm wraps the message
+and keeps vendor names out of our code. `_CREDENTIAL_PATTERNS` renamed `_UNRECOVERABLE_PATTERNS`
+to reflect its broadened scope.
+**Status:** DONE
+
+### 7. Configurable `log_dir` — telemetry off by default
+**Why:** `JsonLogger.__init__` previously called `os.makedirs("./logs")` unconditionally. On
+Lambda the filesystem is read-only outside `/tmp`, so this crashed before a single page was
+processed. `log_dir=None` (the new default) disables telemetry entirely; pass a writable path
+to re-enable it.
+**Status:** DONE
+
+### 8. `build_tree(pages=...)` — second input path from `preprocess()`
+**Why:** downstream the consuming backend extracts page text a second time, independently of the
+tree, to build the catalog that `get_page_content` serves. Text hidden inside `build_tree` would
+produce a correct tree while the backend kept serving blank pages. Returning `norm.pages` removes
+that second read and makes one source of truth per document. The two paths (`source=` vs
+`pages=`) are mutually exclusive; passing both is an error.
+**Status:** DONE
+
+### 9. Pass-through `llm_metadata` for consumer tracing
+**Why:** the consumer enables Langfuse via litellm's process-global callbacks — the fork imports no
+tracing SDK and holds no keys, so vendor choice stays entirely theirs. But Langfuse metadata
+travels per call, and the model calls are the fork's; it cannot be injected from outside. The fork
+owns the pass-through, not the instrumentation.
+
+The value is carried on a `ContextVar` (`_llm_metadata`) set once in `page_index_main` and read at
+the two `litellm.completion` / `litellm.acompletion` call sites. A ContextVar rather than a module
+global because tree building dispatches many concurrent asyncio tasks per document — a plain global
+would let one task's set stomp on another's get. Threading a new `metadata=` argument through the
+~20 upstream call sites that invoke `llm_completion`/`llm_acompletion` was the alternative; it
+would have produced ~24 hunks instead of 4, making future merge conflicts significantly harder to
+read and resolve.
+
+Known gap: a model id with no provider prefix (e.g. `gpt-4o-2024-11-20`) bypasses litellm via the
+OpenAI SDK directly, so neither callbacks nor `llm_metadata` reach it. The symptom is metrics
+silently vanishing, not an error. Prefixed models (`bedrock/...`, `anthropic/...`) are unaffected.
+**Status:** DONE
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired

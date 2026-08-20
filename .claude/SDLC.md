@@ -75,11 +75,29 @@
     - Create a branch from `main` with a consistent name, e.g.:
       - `feature/<service>-<topic-short>`
       - `fix/<service>-<issue-id>`
+
   - Ensure local env is ready (`.env`, `.env.example`, AWS credentials, etc.).
   - For infra changes (Serverless, Nginx, h-conf), verify the plan covers:
     - New env vars / SSM params.
     - IAM / permissions.
     - Rollout strategy.
+
+> **Repo override — PageIndexNF.** This repository does **not** branch from `main`.
+> `main` tracks upstream `VectifyAI/PageIndex`; the fork's internal production branch is
+> **`feature/customizations`**, which the downstream Jungheinrich backend pins directly via
+> `uv add "git+...@feature/customizations"`.
+>
+> Because the fork has no release tags and is not published to PyPI, **the branch name is the
+> version pin for its only consumer**: anything landing on `feature/customizations` ships to that
+> backend immediately.
+>
+> Rules:
+> - Always cut feature branches **from `feature/customizations`**, never from `main`.
+> - Never commit directly to `feature/customizations`; merge into it only after review + QA.
+> - Merge `main` → `feature/customizations` only when deliberately pulling upstream changes, and
+>   record any resulting divergence in `FORK_NOTES.md`.
+> - Phase 7's `dev` branch does not exist here. `feature/<topic>` → review/QA →
+>   `feature/customizations` is the full promotion path.
 
 ---
 

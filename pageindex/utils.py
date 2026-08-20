@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import textwrap
 from datetime import datetime
 import time
@@ -13,7 +14,19 @@ from dotenv import load_dotenv
 load_dotenv()
 from types import SimpleNamespace as config
 import re
+from contextvars import ContextVar
+
 from .config import DEFAULT_CONFIG
+from .errors import LLMConfigError, LLMUnavailableError
+
+# Set once per document by page_index_main, read by the litellm call sites. A ContextVar rather
+# than a module global because tree building runs many nodes concurrently under asyncio, and each
+# task must see the metadata of its own document.
+_llm_metadata: ContextVar[dict | None] = ContextVar("llm_metadata", default=None)
+
+
+def set_llm_metadata(metadata: dict | None) -> None:
+    _llm_metadata.set(metadata)
 
 # litellm is imported inside the functions that use it; eager import is slow
 # and fetches a remote model-cost map.
@@ -64,9 +77,48 @@ def _log_provider_once(model, use_openai_sdk):
 # today. An unknown status is a transport failure and stays retryable.
 _UNRECOVERABLE_STATUS = frozenset({401, 403, 404})
 
+# litellm maps missing credentials to InternalServerError/500, which must stay
+# retryable in general (a genuine 500 from the provider IS transient). We catch
+# the misclassification by inspecting the message text. Layer 1 of the fix.
+# STS-specific phrases cover expired/invalid session tokens from assume-role;
+# these arrive as 400/500 from Bedrock and would otherwise burn the full budget.
+_UNRECOVERABLE_PATTERNS = re.compile(
+    r"missing credentials|api_key|could not locate credentials|"
+    r"access denied|unrecognized client|invalid api key|no credentials|"
+    r"security token|ExpiredToken|UnrecognizedClientException",
+    re.IGNORECASE,
+)
+
 
 def _is_unrecoverable(exc: Exception) -> bool:
-    return getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS
+    # Program- or environment-level errors: an absent module, a missing
+    # attribute, a wrong type. No retry can install a package or fix a
+    # version mismatch — matching by type keeps this independent of how
+    # litellm wraps or reformats the message text.
+    if isinstance(exc, (ImportError, AttributeError, TypeError)):
+        return True
+    if getattr(exc, "status_code", None) in _UNRECOVERABLE_STATUS:
+        return True
+    # Message-level check: litellm reports config errors as 500 — we detect
+    # them by content so they don't burn the full retry budget.
+    return bool(_UNRECOVERABLE_PATTERNS.search(str(exc)))
+
+
+# Layer 2: regardless of how misclassification may evolve, cap the total time
+# any single call can spend retrying. This bounds damage from future cases we
+# haven't anticipated — a tighter safety net than any per-pattern fix.
+_MAX_TOTAL_RETRY_SECONDS = 60
+
+_MAX_BACKOFF_SECONDS = 30
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff with full jitter.
+
+    A flat sleep sends N requests into the same congestion window; jitter spreads retries from
+    concurrent page tasks so they stop arriving in lockstep.
+    """
+    return random.uniform(0, min(2 ** attempt, _MAX_BACKOFF_SECONDS))
 
 
 def llm_completion(model, prompt, chat_history=None, return_finish_reason=False):
@@ -78,6 +130,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
     _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = list(chat_history) + [{"role": "user", "content": prompt}] if chat_history else [{"role": "user", "content": prompt}]
+    t_start = time.perf_counter()
     for i in range(max_retries):
         try:
             if use_openai_sdk:
@@ -96,6 +149,7 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
                     messages=messages,
                     temperature=0,
                     drop_params=True,
+                    metadata=_llm_metadata.get() or {},
                 )
             content = response.choices[0].message.content
             if return_finish_reason:
@@ -104,16 +158,21 @@ def llm_completion(model, prompt, chat_history=None, return_finish_reason=False)
             return content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+                raise LLMConfigError(f"LLM call failed permanently (bad config or environment): {e}") from e
+            logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                time.sleep(1)
+                remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
+                # Clamp sleep to remaining budget: the elapsed-time check alone permits
+                # an overrun of up to one full backoff interval if budget expires during sleep.
+                if remaining <= 0:
+                    raise LLMUnavailableError(
+                        f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
+                    ) from e
+                time.sleep(min(_backoff_seconds(i), remaining))
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                if return_finish_reason:
-                    return "", "error"
-                return ""
+                raise LLMUnavailableError(
+                    f"LLM unavailable after {max_retries} attempts: {e}"
+                ) from e
 
 
 async def llm_acompletion(model, prompt):
@@ -125,6 +184,7 @@ async def llm_acompletion(model, prompt):
     _log_provider_once(model, use_openai_sdk)
     max_retries = 10
     messages = [{"role": "user", "content": prompt}]
+    t_start = time.perf_counter()
     for i in range(max_retries):
         try:
             if use_openai_sdk:
@@ -143,18 +203,26 @@ async def llm_acompletion(model, prompt):
                     messages=messages,
                     temperature=0,
                     drop_params=True,
+                    metadata=_llm_metadata.get() or {},
                 )
             return response.choices[0].message.content
         except Exception as e:
             if _is_unrecoverable(e):
-                raise
-            print('************* Retrying *************')
-            logging.error(f"Error: {e}")
+                raise LLMConfigError(f"LLM call failed permanently (bad config or environment): {e}") from e
+            logging.error(f"LLM call failed (attempt {i + 1}/{max_retries}): {e}")
             if i < max_retries - 1:
-                await asyncio.sleep(1)
+                remaining = _MAX_TOTAL_RETRY_SECONDS - (time.perf_counter() - t_start)
+                # Clamp sleep to remaining budget: the elapsed-time check alone permits
+                # an overrun of up to one full backoff interval if budget expires during sleep.
+                if remaining <= 0:
+                    raise LLMUnavailableError(
+                        f"LLM retry budget exhausted ({_MAX_TOTAL_RETRY_SECONDS}s) after {i + 1} attempts: {e}"
+                    ) from e
+                await asyncio.sleep(min(_backoff_seconds(i), remaining))
             else:
-                logging.error('Max retries reached for prompt: ' + prompt)
-                return ""
+                raise LLMUnavailableError(
+                    f"LLM unavailable after {max_retries} attempts: {e}"
+                ) from e
             
             
 def get_json_content(response):
@@ -352,28 +420,30 @@ def get_pdf_name(pdf_path):
         meta = pdf_reader.metadata
         pdf_name = meta.title if meta and meta.title else 'Untitled'
         pdf_name = sanitize_filename(pdf_name)
+    else:
+        pdf_name = 'Untitled'
     return pdf_name
 
 
 class JsonLogger:
-    def __init__(self, file_path):
-        # Extract PDF name for logger name
+    def __init__(self, file_path, log_dir=None):
+        # No log_dir means telemetry is off: keep the same API but never touch the filesystem,
+        # which is read-only outside /tmp on Lambda.
+        self.log_dir = log_dir
+        self.log_data = []
         pdf_name = get_pdf_name(file_path)
-            
         current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.filename = f"{pdf_name}_{current_time}.json"
-        os.makedirs("./logs", exist_ok=True)
-        # Initialize empty list to store all messages
-        self.log_data = []
+        if self.log_dir:
+            os.makedirs(self.log_dir, exist_ok=True)
 
     def log(self, level, message, **kwargs):
         if isinstance(message, dict):
             self.log_data.append(message)
         else:
             self.log_data.append({'message': message})
-        # Add new message to the log data
-        
-        # Write entire log data to file
+        if not self.log_dir:
+            return
         with open(self._filepath(), "w") as f:
             json.dump(self.log_data, f, indent=2)
 
@@ -391,7 +461,7 @@ class JsonLogger:
         self.log("ERROR", message, **kwargs)
 
     def _filepath(self):
-        return os.path.join("logs", self.filename)
+        return os.path.join(self.log_dir, self.filename)
     
 
 
