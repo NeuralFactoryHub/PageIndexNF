@@ -54,7 +54,8 @@ def _require_tesseract() -> None:
     if shutil.which("tesseract") is None:
         raise MissingSystemDependencyError(
             "tesseract not found. Install it in the runtime image: "
-            "`apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-osd`"
+            "`apt-get install -y tesseract-ocr tesseract-ocr-osd tesseract-ocr-<lang>` "
+            "where <lang> matches every language you pass as ocr_lang"
         )
 
 
@@ -165,7 +166,7 @@ def _classify(pdf_bytes: bytes, doc_name: str = None):
 
 
 OCR_DPI = 150
-OCR_LANG = "ita"
+OCR_LANG = "eng"
 # psm 1 (layout analysis + orientation detection), NOT the brief's psm 6. Two measurements on
 # real client documents forced this:
 #   - Columns: `DUVRI DL01_Toffetti.pdf` p12 is bilingual in two columns. psm 6 and 4 interleave
@@ -266,6 +267,9 @@ def preprocess(
 
     source:   raw bytes, a filesystem path str, or a pathlib.Path
     filename: supplies doc_name and disambiguates the format when bytes arrive with no extension
+    ocr_lang: passed verbatim to Tesseract's -l flag; the matching tesseract-ocr-<lang> pack must
+              be installed in the runtime image. A wrong value degrades OCR silently — Tesseract
+              returns plausible text in the correct alphabet rather than raising.
 
     Returns Normalized(pages, doc_name, report). `pages` is indexed by source ordinal minus one;
     a page whose OCR failed holds "" and its ordinal is listed in report.failed_pages. Page

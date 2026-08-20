@@ -81,6 +81,10 @@ text layer loses the structural boundaries exactly where the annexes begin. `pre
 isolated (like `build_tree.py`) so upstream merges do not conflict.
 **Status:** DONE
 
+**Extended (2026-08-20 — scope fix):** `OCR_LANG` default changed from `"ita"` to `"eng"`.
+The Italian default was inherited from the first consumer and violated the generic-repo scope
+rule (see preamble). Consumers targeting non-English documents must pass `ocr_lang` explicitly.
+
 ### 5. Typed error taxonomy — `pageindex/errors.py`
 **Why:** upstream raises bare `Exception` everywhere and returns `""` on LLM exhaustion. Both
 collapse unrelated causes into one indistinguishable symptom. A caller cannot tell a broken

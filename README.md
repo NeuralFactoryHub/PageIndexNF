@@ -267,6 +267,10 @@ norm.report   # source_format, page_count, text_pages, ocr_pages, failed_pages,
 Page positions are never compacted: a page whose OCR failed holds `""` and its number appears
 in `report.failed_pages`, so page numbers stay aligned with the source document.
 
+`ocr_lang` defaults to `"eng"`. Pass a different value to match your document language
+(e.g. `ocr_lang="ita"`); the matching `tesseract-ocr-<lang>` pack must be installed. A wrong
+value degrades OCR silently — Tesseract returns plausible text without raising.
+
 ### Calling from async code
 
 `preprocess()` is synchronous and runs its own event loop internally (`asyncio.run`). Calling
@@ -286,8 +290,12 @@ A synchronous `def` route needs no wrapper: FastAPI already runs it in a threadp
 The library asserts these; it cannot install them.
 
 ```dockerfile
-RUN apt-get install -y tesseract-ocr tesseract-ocr-ita tesseract-ocr-osd libreoffice
+RUN apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd libreoffice
 ```
+
+Add one `tesseract-ocr-<lang>` pack per language you intend to OCR and pass the matching
+`ocr_lang` to `preprocess()`. A wrong or missing pack degrades OCR silently — Tesseract
+returns plausible text in the correct alphabet without raising.
 
 Both are too heavy for a zip Lambda layer. Use a container-image Lambda.
 
