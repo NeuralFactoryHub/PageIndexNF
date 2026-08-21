@@ -1231,6 +1231,27 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
             f"{a['mode']}={'not verified' if a['accuracy'] is None else format(a['accuracy'], '.2f')}"
             for a in outcome['attempts']
         )
+
+        # Below the gate, keep whatever the judge did accept rather than discarding it with the
+        # rest. A 40-page document scoring 0.55 still has verified sections with correct pages;
+        # collapsing it to one node throws away work that was checked and passed. Requiring the
+        # survivors to span two or more pages keeps out the case where the partial structure
+        # carries no more navigational information than a single node would.
+        if verified:
+            rejected = {r.get('list_index') for r in incorrect_results}
+            survivors = [
+                item for i, item in enumerate(toc_with_page_number)
+                if i not in rejected and item.get('physical_index') is not None
+            ]
+            if len({item['physical_index'] for item in survivors}) >= 2:
+                outcome['partial'] = True
+                logger.info({'partial_structure': True, 'kept': len(survivors),
+                             'dropped': len(toc_with_page_number) - len(survivors),
+                             'attempts': outcome['attempts']})
+                print(f'partial structure: kept {len(survivors)} verified entries of '
+                      f'{len(toc_with_page_number)} ({attempted})')
+                return survivors
+
         if getattr(opt, 'fallback_flat_tree', 'yes') == 'yes':
             # Text that was extracted correctly is worth more as a flat index than as an
             # exception: a caller can still cite pages from one node, and nothing from a raise.
@@ -1327,13 +1348,21 @@ async def tree_parser(page_list, opt, doc=None, logger=None, outcome=None):
 
 
 def _structure_source(outcome):
-    """'verified' when a TOC strategy passed verification, 'flat_fallback' when none did.
+    """How much of the returned structure passed verification.
 
-    A caller cannot infer this from the tree itself: a genuine single-section document and a
-    floor result look identical. Retrieval quality differs sharply between them, so the
+    'verified'      a strategy verified; the structure is complete.
+    'partial'       no strategy verified, but the entries the judge accepted were kept.
+    'flat_fallback' nothing verified; one node spans the document.
+
+    A caller cannot infer this from the tree itself — a genuine single-section document and a
+    floor result look identical — and retrieval quality differs sharply between them, so the
     distinction is part of the returned contract.
     """
-    return 'flat_fallback' if outcome.get('flat_fallback') else 'verified'
+    if outcome.get('flat_fallback'):
+        return 'flat_fallback'
+    if outcome.get('partial'):
+        return 'partial'
+    return 'verified'
 
 
 def page_index_main(doc, opt=None, pages=None, doc_name=None):

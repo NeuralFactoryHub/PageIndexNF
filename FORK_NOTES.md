@@ -279,12 +279,17 @@ noise. Sampling the judge N times would therefore cost N× and change nothing.
   "checked, all wrong". `meta_processor` gates its comparisons on `accuracy is not None`.
 - New `check_coverage` parameter, passed `False` when `mode == 'process_no_toc'`. That mode is
   terminal, so the guard there can only discard work, never redirect it.
-- New config key `fallback_flat_tree` (default `"yes"`): when every strategy fails, return a
+- Below the gate, the entries the checker accepted are kept rather than discarded with the rest,
+  provided they span two or more pages. A 40-page document scoring 0.55 still has verified
+  sections with correct page numbers; collapsing it to one node throws away work that passed.
+  The two-page condition excludes the case where the survivors carry no more navigational
+  information than a single node would.
+- New config key `fallback_flat_tree` (default `"yes"`): when nothing at all verifies, return a
   single node spanning the document instead of raising. For a form with no sections this is the
   correct output, not a degraded one — and correctly extracted text is worth more to a caller as
-  a flat index than as an exception. `page_index_main` reports which happened as
-  `structure_source: "verified" | "flat_fallback"`; the tree alone cannot distinguish a floor
-  result from a genuine one-section document.
+  a flat index than as an exception. `page_index_main` reports which of the three happened as
+  `structure_source: "verified" | "partial" | "flat_fallback"`; the tree alone cannot distinguish
+  a floor result from a genuine one-section document.
 - `process_large_node_recursively` skips subdivision when the floor fires, rather than grafting a
   child identical to its parent.
 - `TreeParseError` (now only reachable with `fallback_flat_tree="no"`) names every strategy that
@@ -295,8 +300,15 @@ noise. Sampling the judge N times would therefore cost N× and change nothing.
 **Verified on** (`bedrock/claude-haiku-4-5`, `preprocess()` → `build_tree()`):
 - Target A (18-page scanned `260227 JUNGHEINRICH.pdf`): was `TreeParseError`; now 100% accuracy,
   13 top-level nodes, `structure_source: verified`.
-- Target B (2-page `AMAZON MEZZATE.docx`): was `TreeParseError`; now 1 node `[1-2] Full document`
-  with a summary, `structure_source: flat_fallback`.
+- Target B (2-page `AMAZON MEZZATE.docx`): was `TreeParseError`; now keeps the 8 accepted entries
+  of 14, `structure_source: partial`. `merge_tree` then collapses them — all sit on the same two
+  pages and add nothing over their parent — leaving `[1-2] INFO PER GESTIONE DUVRI`.
+
+**How likely is the floor on a long document?** Only reachable when nothing verifies. Measured
+accuracy on the multi-page corpus: Toffetti (51p) 93.3 then 100, Lube (36p) 100, Belbo (29p) 100,
+Target A (18p) 100. The one document below the 0.6 gate was the 2-page form. Long documents have
+section titles that appear literally on the page; a form has field labels the generator
+promotes to headings, which is what the checker rejects.
 - Regression (`AMAZON PIOLTELLO.docx`, `AMAZON BURAGO.docx`): 0.9375 / 0.9333, `verified`.
 - Regression (`DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf`, extracted-TOC path): 100%,
   10 top-level nodes, `verified`. Unchanged.

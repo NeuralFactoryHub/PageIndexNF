@@ -98,16 +98,21 @@ Returns the tree as a `dict`. It does **not** persist anything; storing it is th
 ```python
 tree["doc_name"]          # str
 tree["structure"]         # list of nodes, each with title / start_index / end_index / summary
-tree["structure_source"]  # "verified" | "flat_fallback"
+tree["structure_source"]  # "verified" | "partial" | "flat_fallback"
 ```
 
-**`structure_source` is worth reading on every document.** `"verified"` means a table of
-contents was derived and each entry was checked against the page it claims. `"flat_fallback"`
-means no strategy verified and the tree is a single node spanning the whole document: the text
-is intact and still citable by page, but there is no hierarchy to navigate. The two cases are
-indistinguishable from the tree alone — a genuine one-section document looks the same — so the
-field is the only way to tell them apart. Expect `"flat_fallback"` on short form-style
-documents whose headings are field labels rather than sections.
+**`structure_source` is worth reading on every document.**
+
+| Value | Meaning |
+|---|---|
+| `verified` | A table of contents was derived and every entry checked against the page it claims. |
+| `partial` | No strategy passed as a whole, but the entries the checker accepted were kept. The nodes present are verified; some sections of the document have none. |
+| `flat_fallback` | Nothing verified. One node spans the whole document — the text is intact and still citable by page, but there is no hierarchy to navigate. |
+
+The tree alone cannot tell you which happened: a genuine one-section document and a
+`flat_fallback` look identical. Expect `flat_fallback` on short form-style documents whose
+headings are field labels rather than sections. On a long document it means the structure could
+not be read at all, and is worth alerting on.
 
 To restore the previous behaviour and raise `TreeParseError` instead, pass
 `fallback_flat_tree="no"`.
