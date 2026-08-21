@@ -95,6 +95,23 @@ Any valid config key can be passed as a kwarg — `model`, `summary_model`, `ret
 
 Returns the tree as a `dict`. It does **not** persist anything; storing it is the caller's job.
 
+```python
+tree["doc_name"]          # str
+tree["structure"]         # list of nodes, each with title / start_index / end_index / summary
+tree["structure_source"]  # "verified" | "flat_fallback"
+```
+
+**`structure_source` is worth reading on every document.** `"verified"` means a table of
+contents was derived and each entry was checked against the page it claims. `"flat_fallback"`
+means no strategy verified and the tree is a single node spanning the whole document: the text
+is intact and still citable by page, but there is no hierarchy to navigate. The two cases are
+indistinguishable from the tree alone — a genuine one-section document looks the same — so the
+field is the only way to tell them apart. Expect `"flat_fallback"` on short form-style
+documents whose headings are field labels rather than sections.
+
+To restore the previous behaviour and raise `TreeParseError` instead, pass
+`fallback_flat_tree="no"`.
+
 ---
 
 ## 3. Calling from async code
@@ -122,7 +139,7 @@ Every error inherits from `PageIndexError`.
 |---|---|---|
 | `LLMUnavailableError` | **Yes** | Throttling or transport. The only error worth retrying. |
 | `LLMConfigError` | No | Bad key, missing model, permanent environment fault. |
-| `TreeParseError` | No | Deterministic — the same input fails the same way. |
+| `TreeParseError` | No | Only raised when `fallback_flat_tree="no"`. Deterministic. |
 | `UnsupportedFormatError` | No | Not a PDF or a supported Office format. |
 | `ConversionError` | No | LibreOffice could not convert the file. |
 | `OCRError` | No | Tesseract failed on the whole document. |
@@ -132,6 +149,17 @@ Every error inherits from `PageIndexError`.
 `UnsupportedFormatError`, `ConversionError`, `OCRError` and `NotPreprocessedError` all inherit
 from `UnreadableInputError` — catch that one to mean "this document cannot be indexed as
 submitted", and report it to whoever uploaded it.
+
+`TreeParseError` does **not** inherit from `UnreadableInputError`, so catching only
+`UnreadableInputError` to mean "permanent" leaves it in the retryable bucket. Retrying it spends
+the full model budget to fail identically. The recommended catch:
+
+```python
+except LLMUnavailableError:
+    raise                     # the only retryable error
+except PageIndexError:
+    ...                       # permanent: record and move on
+```
 
 The library retries `LLMUnavailableError` internally with exponential backoff, capped at 60s
 total per call. When it gives up, it raises rather than returning empty text.

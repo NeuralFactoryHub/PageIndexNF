@@ -10,6 +10,10 @@ from .errors import NotPreprocessedError, TreeParseError
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Title of the single node emitted when no TOC strategy verifies. Callers detect the flat case
+# via `structure_source` on the returned dict, not by matching this string.
+FLAT_FALLBACK_TITLE = "Full document"
+
 ######################### Hardening for prompt injection patterns ####################################################
 _INJECTION_PATTERNS = re.compile(
     r"(?i)("
@@ -1093,7 +1097,19 @@ async def fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorr
 
 
 ################### verify toc #########################################################
-async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
+async def verify_toc(page_list, list_result, start_index=1, N=None, model=None, check_coverage=True):
+    """Return (accuracy, incorrect_results).
+
+    accuracy is None when nothing could be checked — distinct from 0.0, which means the checks
+    ran and every entry was rejected. Collapsing the two (upstream returned `0, []` for both)
+    makes a healthy structure indistinguishable from a total failure at the call site.
+
+    check_coverage gates the "entries must reach the document's midpoint" heuristic. It holds for
+    an EXTRACTED table of contents, which by construction spans the document, so entries stopping
+    early indicate a parse failure. It does not hold for a GENERATED one: a document whose only
+    headed sections sit in the first pages, followed by unheaded annexes, produces a correct TOC
+    that the heuristic rejects. Callers pass check_coverage=False in that mode.
+    """
     print('start verify_toc')
     # Find the last non-None physical_index
     last_physical_index = None
@@ -1101,11 +1117,13 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
         if item.get('physical_index') is not None:
             last_physical_index = item['physical_index']
             break
-    
+
     # Early return if we don't have valid physical indices
-    if last_physical_index is None or last_physical_index < len(page_list)/2:
-        return 0, []
-    
+    if last_physical_index is None:
+        return None, []
+    if check_coverage and last_physical_index < len(page_list)/2:
+        return None, []
+
     # Determine which items to check
     if N is None:
         print('check all items')
@@ -1143,7 +1161,9 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
     
     # Calculate accuracy
     checked_count = len(results)
-    accuracy = correct_count / checked_count if checked_count > 0 else 0
+    if checked_count == 0:
+        return None, []
+    accuracy = correct_count / checked_count
     print(f"accuracy: {accuracy*100:.2f}%")
     return accuracy, incorrect_results
 
@@ -1152,7 +1172,15 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None):
 
 
 ################### main process #########################################################
-async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None):
+async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None, outcome=None):
+    """Build a verified TOC, degrading through strategies until one verifies.
+
+    `outcome` is an optional dict the caller passes to receive out-of-band results: the
+    per-strategy scores under 'attempts', and 'flat_fallback' when the floor was used. It is
+    threaded through the recursion so the terminal branch can report every strategy that ran.
+    """
+    if outcome is None:
+        outcome = {}
     print(mode)
     print(f'start_index: {start_index}')
     
@@ -1172,39 +1200,72 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
         logger=logger
     )
     
-    accuracy, incorrect_results = await verify_toc(page_list, toc_with_page_number, start_index=start_index, model=opt.model)
-        
+    accuracy, incorrect_results = await verify_toc(
+        page_list, toc_with_page_number, start_index=start_index, model=opt.model,
+        # The TOC was generated, not extracted, so it carries no promise of spanning the document.
+        check_coverage=(mode != 'process_no_toc'),
+    )
+
+    # `mode` verbatim: hardcoding one strategy name here sent every telemetry reader chasing the
+    # wrong branch.
     logger.info({
-        'mode': 'process_toc_with_page_numbers',
+        'mode': mode,
         'accuracy': accuracy,
         'incorrect_results': incorrect_results
     })
-    if accuracy == 1.0 and len(incorrect_results) == 0:
+    outcome.setdefault('attempts', []).append({'mode': mode, 'accuracy': accuracy})
+
+    verified = accuracy is not None
+    if verified and accuracy == 1.0 and len(incorrect_results) == 0:
         return toc_with_page_number
-    if accuracy > 0.6 and len(incorrect_results) > 0:
+    if verified and accuracy > 0.6 and len(incorrect_results) > 0:
         toc_with_page_number, incorrect_results = await fix_incorrect_toc_with_retries(toc_with_page_number, page_list, incorrect_results,start_index=start_index, max_attempts=3, model=opt.model, logger=logger)
         return toc_with_page_number
     else:
         if mode == 'process_toc_with_page_numbers':
-            return await meta_processor(page_list, mode='process_toc_no_page_numbers', toc_content=toc_content, toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger)
+            return await meta_processor(page_list, mode='process_toc_no_page_numbers', toc_content=toc_content, toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger, outcome=outcome)
         elif mode == 'process_toc_no_page_numbers':
-            return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger)
-        else:
-            raise TreeParseError(
-                "Could not derive a document structure: exhausted all TOC strategies "
-                "(process_toc_with_page_numbers, process_toc_no_page_numbers, process_no_toc)",
-                doc_name=getattr(logger, 'filename', None),
-            )
+            return await meta_processor(page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger, outcome=outcome)
+
+        attempted = ", ".join(
+            f"{a['mode']}={'not verified' if a['accuracy'] is None else format(a['accuracy'], '.2f')}"
+            for a in outcome['attempts']
+        )
+        if getattr(opt, 'fallback_flat_tree', 'yes') == 'yes':
+            # Text that was extracted correctly is worth more as a flat index than as an
+            # exception: a caller can still cite pages from one node, and nothing from a raise.
+            outcome['flat_fallback'] = True
+            logger.info({'flat_fallback': True, 'attempts': outcome['attempts']})
+            print(f'flat fallback: no strategy verified ({attempted})')
+            return [{
+                'structure': '1',
+                'title': FLAT_FALLBACK_TITLE,
+                'physical_index': start_index,
+                'flat_fallback': True,
+            }]
+        raise TreeParseError(
+            f"Could not derive a document structure. Strategies attempted: {attempted}",
+            doc_name=getattr(logger, 'filename', None),
+        )
         
  
 async def process_large_node_recursively(node, page_list, opt=None, logger=None):
     node_page_list = page_list[node['start_index']-1:node['end_index']]
     token_num = sum([page[1] for page in node_page_list])
-    
+
+    subdivided = False
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
         print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
 
         node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
+
+        # The floor returns one node spanning what we already have, so subdividing with it would
+        # graft a child identical to its parent. A large node that cannot be split stays whole.
+        subdivided = not any(item.get('flat_fallback') for item in node_toc_tree)
+        if not subdivided:
+            print('large node not subdivided:', node['title'])
+
+    if subdivided:
         node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
         
         # Filter out items with None physical_index before post_processing
@@ -1226,26 +1287,28 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
     
     return node
 
-async def tree_parser(page_list, opt, doc=None, logger=None):
+async def tree_parser(page_list, opt, doc=None, logger=None, outcome=None):
     check_toc_result = check_toc(page_list, opt)
     logger.info(check_toc_result)
 
     if check_toc_result.get("toc_content") and check_toc_result["toc_content"].strip() and check_toc_result["page_index_given_in_toc"] == "yes":
         toc_with_page_number = await meta_processor(
-            page_list, 
-            mode='process_toc_with_page_numbers', 
-            start_index=1, 
-            toc_content=check_toc_result['toc_content'], 
-            toc_page_list=check_toc_result['toc_page_list'], 
+            page_list,
+            mode='process_toc_with_page_numbers',
+            start_index=1,
+            toc_content=check_toc_result['toc_content'],
+            toc_page_list=check_toc_result['toc_page_list'],
             opt=opt,
-            logger=logger)
+            logger=logger,
+            outcome=outcome)
     else:
         toc_with_page_number = await meta_processor(
-            page_list, 
-            mode='process_no_toc', 
-            start_index=1, 
+            page_list,
+            mode='process_no_toc',
+            start_index=1,
             opt=opt,
-            logger=logger)
+            logger=logger,
+            outcome=outcome)
 
     toc_with_page_number = add_preface_if_needed(toc_with_page_number)
     toc_with_page_number = await check_title_appearance_in_start_concurrent(toc_with_page_number, page_list, model=opt.model, logger=logger)
@@ -1261,6 +1324,16 @@ async def tree_parser(page_list, opt, doc=None, logger=None):
     await asyncio.gather(*tasks)
     
     return toc_tree
+
+
+def _structure_source(outcome):
+    """'verified' when a TOC strategy passed verification, 'flat_fallback' when none did.
+
+    A caller cannot infer this from the tree itself: a genuine single-section document and a
+    floor result look identical. Retrieval quality differs sharply between them, so the
+    distinction is part of the returned contract.
+    """
+    return 'flat_fallback' if outcome.get('flat_fallback') else 'verified'
 
 
 def page_index_main(doc, opt=None, pages=None, doc_name=None):
@@ -1295,8 +1368,10 @@ def page_index_main(doc, opt=None, pages=None, doc_name=None):
     logger.info({'total_page_number': len(page_list)})
     logger.info({'total_token': sum([page[1] for page in page_list])})
 
+    outcome = {}
+
     async def page_index_builder():
-        structure = await tree_parser(page_list, opt, doc=doc, logger=logger)
+        structure = await tree_parser(page_list, opt, doc=doc, logger=logger, outcome=outcome)
         merge_tree(structure)
         if opt.if_add_node_id == 'yes':
             write_node_id(structure)
@@ -1317,11 +1392,13 @@ def page_index_main(doc, opt=None, pages=None, doc_name=None):
                     'doc_name': doc_name or get_pdf_name(doc),
                     'doc_description': doc_description,
                     'structure': structure,
+                    'structure_source': _structure_source(outcome),
                 }
         structure = format_structure(structure, order=['title', 'node_id', 'start_index', 'end_index', 'key_items', 'summary', 'text', 'nodes'])
         return {
             'doc_name': doc_name or get_pdf_name(doc),
             'structure': structure,
+            'structure_source': _structure_source(outcome),
         }
 
     return asyncio.run(page_index_builder())

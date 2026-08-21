@@ -20,6 +20,10 @@ DEFAULT_CONFIG = {
     "if_add_node_summary": "yes",
     "if_add_doc_description": "no",
     "if_add_node_text": "no",
+    # "yes" = when every TOC strategy fails, return a single node spanning the document instead
+    # of raising TreeParseError. Correctly extracted text is worth more to a caller as a flat
+    # index than as an exception. Set to "no" to restore the raising behaviour.
+    "fallback_flat_tree": "yes",
     "log_dir": None,         # None = telemetry off; set a writable path to enable (e.g. "/tmp/pageindex")
     "llm_metadata": None,    # dict forwarded verbatim to litellm (e.g. Langfuse trace_id/tags)
 }
