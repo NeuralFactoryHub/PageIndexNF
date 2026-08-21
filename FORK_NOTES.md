@@ -240,6 +240,93 @@ numeric-only language and operates at raw-text level (no JSON schema). No gap fo
 
 **Status:** DONE (prompt fix); downstream null-page handling open for audit.
 
+### 11. `verify_toc` — tri-state result, mode-aware coverage check, flat-tree floor
+**Why:** Two documents out of a six-document consumer batch (33%) raised `TreeParseError` despite
+having their text extracted correctly. Both failures resolve to `verify_toc` (`page_index.py:1096`),
+by two different paths.
+
+**Path A — a correct structure discarded without being checked.** Upstream returned `0, []` from
+the early guard `last_physical_index is None or last_physical_index < len(page_list)/2`. That
+heuristic — "TOC entries should reach the document's midpoint" — holds for an *extracted* table of
+contents, which by construction spans the document. It does not hold for a *generated* one. An
+18-page scanned DUVRI (5 pages of numbered sections, 13 pages of unheaded annexes and signature
+forms) produced a clean 12-entry TOC that the guard rejected at `last_physical_index=5 < 9.0`.
+`check_title_appearance` never ran on a single entry. `meta_processor` cannot distinguish that
+`0, []` from "every entry was checked and every entry was wrong", so it fell to the terminal
+`else` and raised. **When the guard is skipped in this mode, the same document verifies at 100%.**
+
+Aggravating detail: `tree_parser` enters `meta_processor` *directly* with `mode='process_no_toc'`
+when no TOC is found, so the terminal branch fires on the first attempt. The message
+"exhausted all TOC strategies (…, …, …)" named three strategies when one had run.
+
+**Path B — a document with no hierarchy to find.** A 2-page form ("INFO PER GESTIONE DUVRI",
+1734 chars) has field labels, not sections. `generate_toc_init` normalised 14 labels into
+Title-Case headings, one on the wrong page. `check_title_appearance` correctly rejected 6 of 14
+(e.g. generated `Referenti` against text reading "Referente cliente"; generated `Tipo di Pratica`
+against "PRATICA / NUOVA / NULLA MUTATO"). At 0.5714 the structure fell below the `> 0.6` gate
+and the whole document was discarded — including the 8 entries the judge had accepted.
+
+The consumer attributed Path B to verifier variance. Measurement does not support that: five runs
+of the failing document returned 0.5714 every time, and its two sibling documents from the same
+template returned 1.00 and 0.9333 stably (`llm_completion` calls with `temperature=0`). One later
+run of the 1.00 document returned 0.9375, so the judge is near-deterministic rather than exactly
+deterministic — but the 1.00 / 0.93 / 0.57 spread is produced by the documents, not by run-to-run
+noise. Sampling the judge N times would therefore cost N× and change nothing.
+
+**Changes:**
+- `verify_toc` returns `accuracy=None` for "could not check" — the three paths that produced
+  `0, []` (no valid physical index, coverage guard, zero items checked) — leaving `0.0` to mean
+  "checked, all wrong". `meta_processor` gates its comparisons on `accuracy is not None`.
+- New `check_coverage` parameter, passed `False` when `mode == 'process_no_toc'`. That mode is
+  terminal, so the guard there can only discard work, never redirect it.
+- Below the gate, the entries the checker accepted are kept rather than discarded with the rest,
+  provided they span two or more pages. A 40-page document scoring 0.55 still has verified
+  sections with correct page numbers; collapsing it to one node throws away work that passed.
+  The two-page condition excludes the case where the survivors carry no more navigational
+  information than a single node would.
+- New config key `fallback_flat_tree` (default `"yes"`): when nothing at all verifies, return a
+  single node spanning the document instead of raising. For a form with no sections this is the
+  correct output, not a degraded one — and correctly extracted text is worth more to a caller as
+  a flat index than as an exception. `page_index_main` reports which of the three happened as
+  `structure_source: "verified" | "partial" | "flat_fallback"`; the tree alone cannot distinguish
+  a floor result from a genuine one-section document.
+- `process_large_node_recursively` skips subdivision when the floor fires, rather than grafting a
+  child identical to its parent.
+- `TreeParseError` (now only reachable with `fallback_flat_tree="no"`) names every strategy that
+  ran and what each scored.
+- `logger.info` emits the real `mode` instead of the hardcoded `'process_toc_with_page_numbers'`
+  (`page_index.py:1172`). All consumer telemetry reported the wrong mode, costing diagnosis time.
+
+**Verified on** (`bedrock/claude-haiku-4-5`, `preprocess()` → `build_tree()`):
+- Target A (18-page scanned `260227 JUNGHEINRICH.pdf`): was `TreeParseError`; now 100% accuracy,
+  13 top-level nodes, `structure_source: verified`.
+- Target B (2-page `AMAZON MEZZATE.docx`): was `TreeParseError`; now keeps the 8 accepted entries
+  of 14, `structure_source: partial`. `merge_tree` then collapses them — all sit on the same two
+  pages and add nothing over their parent — leaving `[1-2] INFO PER GESTIONE DUVRI`.
+
+**How likely is the floor on a long document?** Only reachable when nothing verifies. Measured
+accuracy on the multi-page corpus: Toffetti (51p) 93.3 then 100, Lube (36p) 100, Belbo (29p) 100,
+Target A (18p) 100. The one document below the 0.6 gate was the 2-page form. Long documents have
+section titles that appear literally on the page; a form has field labels the generator
+promotes to headings, which is what the checker rejects.
+- Regression (`AMAZON PIOLTELLO.docx`, `AMAZON BURAGO.docx`): 0.9375 / 0.9333, `verified`.
+- Regression (`DUVRI Belbo Sugheri_Rev.02_2026_con allegati.pdf`, extracted-TOC path): 100%,
+  10 top-level nodes, `verified`. Unchanged.
+- Regression (`Lube Duvri.pdf`, no-TOC path): 100%, 7 top-level nodes, `verified`.
+- Regression (`DUVRI DL01_Toffetti.pdf`, 51 pages, fully scanned): 93.33% then 100%, hierarchical
+  tree to 4 levels, `verified`. Unchanged.
+
+**Not established:** whether the judge's stricter rejections (3 of the 6 on Target B were literal
+substrings of the page text, inside question sentences) misfire on documents that *do* have real
+sections. None of the six documents showed it, but the corpus is small.
+
+**Open:** `TreeParseError` still sits outside `UnreadableInputError`, so a caller catching only
+`UnreadableInputError` as "permanent" retries it. Documented in `INTEGRATION.md` §4 with the
+recommended catch; a shared base class for deterministic document-level failures would fix it
+properly but changes the public exception hierarchy.
+
+**Status:** DONE.
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired
