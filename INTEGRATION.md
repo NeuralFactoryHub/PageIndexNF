@@ -26,16 +26,16 @@ RUN apt-get install -y tesseract-ocr tesseract-ocr-osd tesseract-ocr-eng libreof
 Add one `tesseract-ocr-<lang>` pack per language you intend to OCR. For Italian documents:
 `tesseract-ocr-ita`.
 
-### Python dependency to pin
+### Python dependencies
 
-```
-langfuse<3
-```
+No pin is required. Any Langfuse version works, including none at all — the fork imports no
+tracing SDK. Which callback you select in §5 determines what, if anything, Langfuse needs to be.
 
-`litellm 1.84.0` initialises its Langfuse callback against the v2 SDK. With langfuse 4.x it
-raises `AttributeError: module 'langfuse' has no attribute 'version'`; with the package absent,
+One trap worth knowing before you get there: litellm's legacy `"langfuse"` callback initialises
+against the **v2** SDK. Select it with langfuse 3.x/4.x installed and it raises
+`AttributeError: module 'langfuse' has no attribute 'version'`; with the package absent,
 `ModuleNotFoundError`. Either error propagates out of the model call, so **indexing fails, not
-just telemetry**. An unpinned install resolves to 4.x. Verified working: `langfuse==2.60.10`.
+just telemetry**. §5 avoids this entirely.
 
 ---
 
@@ -141,34 +141,68 @@ total per call. When it gives up, it raises rather than returning empty text.
 ## 5. Observability
 
 The fork depends on no tracing vendor. litellm's callbacks are process-global and every model
-call goes through litellm, so enable tracing from your side:
+call goes through litellm, so enable tracing from your side.
+
+Use the OTEL callback. It talks to Langfuse over OTLP and never imports the `langfuse`
+package, so it works with any SDK version — 4.x included.
 
 ```python
 import litellm
-litellm.success_callback = ["langfuse"]
-litellm.failure_callback = ["langfuse"]
+litellm.success_callback = ["langfuse_otel"]
+litellm.failure_callback = ["langfuse_otel"]
 ```
 
-One document produces ~40 model calls. To collect them into a single trace instead of 40
-unrelated ones, pass metadata through:
+Required environment: `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and
+`USE_OTEL_LITELLM_REQUEST_SPAN=true` (explained below). **Set `LANGFUSE_HOST` explicitly** —
+unset, this callback defaults to the *US* cloud endpoint, while the v2 SDK defaulted to *EU*.
+OTLP export failures do not propagate, so a wrong host loses traces silently.
+
+### Grouping the calls
+
+One document produces ~40-56 model calls. Wrap both library calls in one span of your own; the
+fork's calls attach to it through OTEL context propagation, which survives the concurrent asyncio
+tasks inside `build_tree`.
 
 ```python
-tree = build_tree(
-    pages=norm.pages,
-    doc_name=norm.doc_name,
-    llm_metadata={
-        "trace_id": case_id,          # the grouping key
-        "session_id": user_session,
-        "trace_name": f"index:{norm.doc_name}",
-        "tags": ["indexing"],
-    },
-)
+from langfuse import get_client
+
+with get_client().start_as_current_observation(name=f"index:{doc_name}", as_type="span"):
+    norm = preprocess(raw_bytes, filename=..., ocr_lang="ita")
+    tree = build_tree(
+        pages=norm.pages,
+        doc_name=norm.doc_name,
+        llm_metadata={
+            "session_id": user_session,
+            "tags": ["indexing"],
+        },
+    )
 ```
+
+**`USE_OTEL_LITELLM_REQUEST_SPAN=true` is not optional.** litellm emits two spans per call; only
+one carries model, token counts and cost. When a parent span exists, litellm skips creating that
+one by default to keep the hierarchy shallow (`litellm/integrations/opentelemetry.py:1302`). The
+result still groups correctly but every observation lands as a bare `SPAN` with
+`totalCost=0`. The flag restores it.
+
+**`trace_id` in `llm_metadata` no longer groups anything.** Langfuse builds the trace from the
+OTEL trace id and ignores the `langfuse.trace.id` attribute — passing it produces one trace per
+call. Grouping comes from the parent span, not from metadata. `session_id`, `trace_name` and
+`tags` still propagate normally.
+
+Verified 2026-08-21 on langfuse 4.14.4 + litellm 1.84.0, indexing a 29-page document: one trace,
+113 observations, 56 `GENERATION`s all carrying model and usage, `totalCost` $0.1338, 95,913
+tokens. Evidence: `docs/plans/2026-08-21-langfuse-otel/validation/`.
 
 **Known gap:** a model id with no provider prefix (`gpt-4o-2024-11-20`) is dispatched through
 the OpenAI SDK directly, bypassing litellm — so neither the callbacks nor `llm_metadata` apply.
 Prefixed ids (`bedrock/...`, `anthropic/...`) are fully traced. This is silent: metrics simply
 stop appearing.
+
+### Staying on the v2 callback
+
+`["langfuse"]` still works and needs no parent span, but requires `langfuse<3` pinned across your
+whole application. Only worth it if something else in your stack depends on the v2 SDK.
+
 
 ---
 

@@ -13,11 +13,9 @@ llm_metadata would all silently not apply.
 
 Environment:
     E2E_OCR_LANG    Tesseract language pack (default "ita"; the library's own default is "eng")
-    E2E_TRACE_ID    override the generated trace id
     E2E_SESSION_ID  Langfuse session (default "e2e-check")
     E2E_OUT         where to write the resulting tree (default ./e2e_tree.json)
 """
-import hashlib
 import json
 import os
 import sys
@@ -36,20 +34,19 @@ if not DOC or not MODEL:
 # Optional: prove the Langfuse wiring works if the keys happen to be present. Tracing is enabled
 # from outside the library on purpose — litellm's callbacks are process-global and the fork
 # depends on no tracing vendor.
-if os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"):
+TRACING = bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+if TRACING:
     import litellm
 
-    litellm.success_callback = ["langfuse"]
-    litellm.failure_callback = ["langfuse"]
-    print("langfuse: callbacks enabled")
+    # langfuse_otel, not "langfuse": the OTEL callback imports no langfuse SDK, so it works with
+    # any installed version. USE_OTEL_LITELLM_REQUEST_SPAN is what keeps model/usage/cost on the
+    # observations once a parent span exists - without it every generation lands empty.
+    os.environ.setdefault("USE_OTEL_LITELLM_REQUEST_SPAN", "true")
+    litellm.success_callback = ["langfuse_otel"]
+    litellm.failure_callback = ["langfuse_otel"]
+    print("langfuse: langfuse_otel callbacks enabled")
 else:
     print("langfuse: keys absent, skipping callback wiring")
-
-TRACE_ID = os.getenv("E2E_TRACE_ID") or hashlib.sha1(
-    f"{os.path.basename(DOC)}|{int(time.time())}".encode()
-).hexdigest()
-
-print(f"trace:   {TRACE_ID}")
 print(f"model:   {MODEL}")
 print(f"file:    {DOC}\n")
 
@@ -66,20 +63,24 @@ print(f"  wall={time.perf_counter() - t0:.2f}s\n")
 
 # ---------------------------------------------------------------- stage 2
 t1 = time.perf_counter()
-tree = build_tree(
-    pages=norm.pages,
-    doc_name=norm.doc_name,
-    model=MODEL,
-    llm_metadata={
-        # trace_id is THE grouping key: every generation carrying the same value lands in one
-        # Langfuse trace. Without it litellm falls back to litellm_call_id — a new trace per
-        # call, which is unreadable at ~40 calls per document.
-        "trace_id": TRACE_ID,
-        "session_id": os.getenv("E2E_SESSION_ID", "e2e-check"),
-        "trace_name": f"index:{norm.doc_name}",
-        "tags": ["e2e-check", "indexing"],
-    },
-)
+# Grouping comes from an enclosing span, not from llm_metadata: Langfuse builds the trace from
+# the OTEL trace id and ignores a caller-supplied "trace_id". Context propagation carries the
+# parent across build_tree's concurrent asyncio tasks.
+META = {
+    "session_id": os.getenv("E2E_SESSION_ID", "e2e-check"),
+    "tags": ["e2e-check", "indexing"],
+}
+if TRACING:
+    from langfuse import get_client
+
+    _lf = get_client()
+    with _lf.start_as_current_observation(name=f"index:{norm.doc_name}", as_type="span"):
+        print(f"trace:   {_lf.get_trace_url()}")
+        tree = build_tree(pages=norm.pages, doc_name=norm.doc_name, model=MODEL,
+                          llm_metadata=META)
+    _lf.flush()
+else:
+    tree = build_tree(pages=norm.pages, doc_name=norm.doc_name, model=MODEL, llm_metadata=META)
 print("--- build_tree ---")
 print(f"  wall={time.perf_counter() - t1:.2f}s")
 print(f"  doc_name={tree.get('doc_name')!r}   <-- must NOT be 'Untitled'")
