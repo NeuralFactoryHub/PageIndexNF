@@ -114,6 +114,29 @@ The tree alone cannot tell you which happened: a genuine one-section document an
 headings are field labels rather than sections. On a long document it means the structure could
 not be read at all, and is worth alerting on.
 
+**`structure_attempts` records how the run got there.** `structure_source` and
+`structure_attempts` answer two different questions: `structure_source` is the quality of the
+result, `structure_attempts` is the derivational history. A consumer deciding whether to trust a
+tree reads `structure_source`; one auditing or debugging why a document degraded reads
+`structure_attempts`.
+
+```python
+tree["structure_attempts"]
+# [
+#   {"mode": "process_toc_with_page_numbers", "accuracy": None, "error": "TocTransformError"},
+#   {"mode": "process_toc_no_page_numbers",   "accuracy": None, "error": "skipped"},
+#   {"mode": "process_no_toc",                "accuracy": 0.94, "error": None},
+# ]
+```
+
+A list, one entry per strategy the ladder attempted, in the order it tried them.
+
+| Key | Meaning |
+|---|---|
+| `mode` | Which strategy this entry is about. |
+| `accuracy` | A float once the strategy ran and was checked; `None` if it never verified (raised, or was skipped). |
+| `error` | `None` on a normal return; the raised exception's class name if the strategy raised; `"skipped"` if the ladder deliberately did not run it (it would have failed identically to the entry before it). |
+
 To restore the previous behaviour and raise `TreeParseError` instead, pass
 `fallback_flat_tree="no"`.
 

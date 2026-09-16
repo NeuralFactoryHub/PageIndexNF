@@ -327,6 +327,56 @@ properly but changes the public exception hierarchy.
 
 **Status:** DONE.
 
+### 12. `TreeParseError` enters the degradation ladder instead of unwinding past it
+**Why:** `meta_processor`'s strategy dispatch had no `try/except` around the calls to
+`process_toc_with_page_numbers` / `process_toc_no_page_numbers` / `process_no_toc`. A
+`TreeParseError` raised inside `toc_transformer` unwound straight past the ladder, before
+`accuracy` (the value the ladder actually degrades on) existed — killing the document even though
+a working fallback (`process_no_toc`) sat two strategies below. The trigger: a TOC line that
+merges two section numbers into one entry (e.g. `1.- 2. Title`) cannot be copied into a single
+`structure` field, so a faithful transcription renumbers everything after it — a defect of the
+source, not of the transform.
+
+Compounding this, `check_if_toc_transformation_is_complete` never defined "complete", so the
+model read it as "well formed and correctly numbered" instead of "nothing is missing". That
+contradicts `toc_transformer`, which is instructed to transcribe faithfully, defects included: the
+transform could not pass the judge without falsifying the source it was asked to reproduce.
+
+**Do:**
+- `check_if_toc_transformation_is_complete`'s prompt now defines completeness as coverage only:
+  reproducing a flaw of the source (backward, duplicated, merged, or missing numbering) is
+  explicitly correct; only a missing entry or a response cut off mid-entry is incomplete. This
+  judge is also the truncation detector for the `max_output_reached` continuation path in
+  `toc_transformer`, so the "no" branch stays narrowly scoped to coverage failures — loosening it
+  into "always yes" would silently break that continuation path.
+- A new `TocTransformError(TreeParseError)` carries provenance: both TOC-based strategies call
+  `toc_transformer` with the same input, so once it has failed for one of them the other is a
+  guaranteed, not a possible, loss. `toc_transformer`'s two maximum-retries raises now use this
+  type; `extract_toc_content`'s raises (a different stage) are unchanged.
+- The mode dispatch in `meta_processor` now catches `TreeParseError` and translates it into the
+  ladder's own signal (`accuracy = None`), recording `{mode, accuracy: None, error: <exception
+  class name>}` and delegating to a new `_next_strategy` helper that resumes the ladder one step
+  below the failing mode. When the failure is specifically a `TocTransformError` from
+  `process_toc_with_page_numbers`, `process_toc_no_page_numbers` is skipped — not attempted — and
+  the skip is recorded as `{mode: "process_toc_no_page_numbers", accuracy: None, error:
+  "skipped"}`. Only `TreeParseError` is caught: `LLMUnavailableError`, `LLMConfigError`, and the
+  `UnreadableInputError` family sit on sibling branches of `PageIndexError` and still propagate
+  unchanged — a throttled or misconfigured model is not evidence about the document.
+- `page_index_main` now returns `structure_attempts` alongside the existing `structure_source`:
+  the full per-strategy trace (`{mode, accuracy, error}` for every attempt, in order), including
+  skipped strategies. `structure_source` keeps its three existing values and its current meaning
+  (how much of the result passed verification); `structure_attempts` is a separate, additive axis
+  (why the run took the path it did) — collapsing the two would break consumers branching on
+  `structure_source == "verified"`.
+
+**Verified:** existing suite green (`python -m pytest -q`); the tightened judge scored 5/5 `yes`
+on a faithful transform reproducing merged/duplicated/backward numbering and 5/5 `no` on the same
+content truncated mid-entry (real Bedrock model, synthetic fixture, 5 runs per direction); an
+end-to-end run with the first strategy forced to raise `TocTransformError` completed without
+raising, degraded straight to `process_no_toc` (skipping the middle strategy), and verified at
+100% — `structure_attempts` recorded all three steps with the expected shape.
+**Status:** DONE.
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired
