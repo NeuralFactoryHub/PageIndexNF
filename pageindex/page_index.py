@@ -6,7 +6,7 @@ import random
 import re
 from .utils import *
 from .tree_optimize import merge_tree
-from .errors import NotPreprocessedError, TreeParseError
+from .errors import NotPreprocessedError, TocTransformError, TreeParseError
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -221,12 +221,25 @@ def check_if_toc_extraction_is_complete(content, toc, model=None):
 
 def check_if_toc_transformation_is_complete(content, toc, model=None):
     prompt = f"""
-    You are given a raw table of contents and a  table of contents.
-    Your job is to check if the  table of contents is complete.
+    You are given a raw table of contents and a cleaned JSON version of it.
+    Your only job is to check COVERAGE: whether every entry of the raw table of contents is
+    present in the cleaned version, and whether the cleaned version ends where the raw one ends.
+
+    Answer "yes" when the cleaned version covers the raw one, even if the raw table of contents
+    is itself flawed. Reproducing a flaw of the source is CORRECT behaviour, not an error.
+    Flaws you must NOT penalise:
+      - numbering that repeats, skips, or runs backwards
+      - several section numbers merged into one line
+      - entries with no number at all
+      - inconsistent depth or indentation
+
+    Answer "no" ONLY when the cleaned version fails to cover the raw one, that is:
+      - entries present in the raw text are missing from the cleaned version, or
+      - the cleaned version is cut off before the end of the raw text (truncated mid-entry).
 
     Reply format:
     {{
-        "thinking": <why do you think the cleaned table of contents is complete or not>
+        "thinking": <which raw entries you checked, and whether any is missing or the output is cut off>
         "completed": "yes" or "no"
     }}
     Directly return the final JSON structure. Do not output anything else."""
@@ -418,7 +431,7 @@ def toc_transformer(toc_content, model=None):
                 last_complete = extract_json(last_complete)
                 cleaned_response = convert_page_to_int(last_complete.get('table_of_contents', []))
                 return cleaned_response
-        raise TreeParseError('Failed to complete TOC transformation after maximum retries')
+        raise TocTransformError('Failed to complete TOC transformation after maximum retries')
 
     # finish_reason == 'max_output_reached': response was truncated — continue from partial.
     last_complete = get_json_content(last_complete)
@@ -448,7 +461,7 @@ def toc_transformer(toc_content, model=None):
         if if_complete == "yes" and finish_reason == "finished":
             break
     else:
-        raise TreeParseError('Failed to complete TOC transformation after maximum retries')
+        raise TocTransformError('Failed to complete TOC transformation after maximum retries')
 
     last_complete = extract_json(last_complete)
 
@@ -1172,6 +1185,36 @@ async def verify_toc(page_list, list_result, start_index=1, N=None, model=None, 
 
 
 ################### main process #########################################################
+async def _next_strategy(exc, page_list, mode=None, toc_content=None, toc_page_list=None,
+                         start_index=1, opt=None, logger=None, outcome=None):
+    """Resume the ladder one step below `mode` after it raised.
+
+    A TocTransformError skips the remaining TOC-based strategy: it calls `toc_transformer` with
+    the same input, so it would fail identically after another round of model calls. The skip is
+    still recorded, so a reader of `structure_attempts` does not mistake it for a strategy that
+    was never reachable.
+    """
+    if mode == 'process_no_toc':
+        # The floor strategy raised; there is nothing below it to degrade to.
+        raise exc
+
+    if mode == 'process_toc_with_page_numbers' and not isinstance(exc, TocTransformError):
+        return await meta_processor(
+            page_list, mode='process_toc_no_page_numbers', toc_content=toc_content,
+            toc_page_list=toc_page_list, start_index=start_index, opt=opt, logger=logger,
+            outcome=outcome)
+
+    if mode == 'process_toc_with_page_numbers':
+        logger.info({'mode': 'process_toc_no_page_numbers', 'accuracy': None, 'error': 'skipped'})
+        outcome.setdefault('attempts', []).append(
+            {'mode': 'process_toc_no_page_numbers', 'accuracy': None, 'error': 'skipped'}
+        )
+
+    return await meta_processor(
+        page_list, mode='process_no_toc', start_index=start_index, opt=opt, logger=logger,
+        outcome=outcome)
+
+
 async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=None, start_index=1, opt=None, logger=None, outcome=None):
     """Build a verified TOC, degrading through strategies until one verifies.
 
@@ -1184,14 +1227,29 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
     print(mode)
     print(f'start_index: {start_index}')
     
-    if mode == 'process_toc_with_page_numbers':
-        toc_with_page_number = process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, model=opt.model, logger=logger)
-    elif mode == 'process_toc_no_page_numbers':
-        toc_with_page_number = process_toc_no_page_numbers(toc_content, toc_page_list, page_list, model=opt.model, logger=logger)
-    else:
-        toc_with_page_number = process_no_toc(page_list, start_index=start_index, model=opt.model, logger=logger)
-            
-    toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None] 
+    # A strategy that raises is a strategy that did not verify. The ladder below already knows how
+    # to answer that — `accuracy is None` — but only for strategies that return; an exception
+    # unwinds past it and kills the document although a working fallback sits two lines down.
+    # Only TreeParseError is translated: an unavailable or misconfigured model is not evidence
+    # about the document, and degrading on it would freeze a transient fault into a poor index.
+    try:
+        if mode == 'process_toc_with_page_numbers':
+            toc_with_page_number = process_toc_with_page_numbers(toc_content, toc_page_list, page_list, toc_check_page_num=opt.toc_check_page_num, model=opt.model, logger=logger)
+        elif mode == 'process_toc_no_page_numbers':
+            toc_with_page_number = process_toc_no_page_numbers(toc_content, toc_page_list, page_list, model=opt.model, logger=logger)
+        else:
+            toc_with_page_number = process_no_toc(page_list, start_index=start_index, model=opt.model, logger=logger)
+    except TreeParseError as exc:
+        logger.info({'mode': mode, 'accuracy': None, 'error': type(exc).__name__, 'detail': str(exc)})
+        outcome.setdefault('attempts', []).append(
+            {'mode': mode, 'accuracy': None, 'error': type(exc).__name__}
+        )
+        return await _next_strategy(
+            exc, page_list, mode=mode, toc_content=toc_content, toc_page_list=toc_page_list,
+            start_index=start_index, opt=opt, logger=logger, outcome=outcome,
+        )
+
+    toc_with_page_number = [item for item in toc_with_page_number if item.get('physical_index') is not None]
     
     toc_with_page_number = validate_and_truncate_physical_indices(
         toc_with_page_number, 
@@ -1213,7 +1271,7 @@ async def meta_processor(page_list, mode=None, toc_content=None, toc_page_list=N
         'accuracy': accuracy,
         'incorrect_results': incorrect_results
     })
-    outcome.setdefault('attempts', []).append({'mode': mode, 'accuracy': accuracy})
+    outcome.setdefault('attempts', []).append({'mode': mode, 'accuracy': accuracy, 'error': None})
 
     verified = accuracy is not None
     if verified and accuracy == 1.0 and len(incorrect_results) == 0:
@@ -1422,12 +1480,14 @@ def page_index_main(doc, opt=None, pages=None, doc_name=None):
                     'doc_description': doc_description,
                     'structure': structure,
                     'structure_source': _structure_source(outcome),
+                    'structure_attempts': outcome.get('attempts', []),
                 }
         structure = format_structure(structure, order=['title', 'node_id', 'start_index', 'end_index', 'key_items', 'summary', 'text', 'nodes'])
         return {
             'doc_name': doc_name or get_pdf_name(doc),
             'structure': structure,
             'structure_source': _structure_source(outcome),
+            'structure_attempts': outcome.get('attempts', []),
         }
 
     return asyncio.run(page_index_builder())

@@ -58,3 +58,12 @@ class LLMConfigError(PageIndexError):
 # (c) The model answered but the structure could not be built from the answer.
 class TreeParseError(PageIndexError):
     pass
+
+
+class TocTransformError(TreeParseError):
+    """The raw TOC could not be turned into JSON.
+
+    Provenance, not a new failure class. Both TOC-based strategies call `toc_transformer` with
+    the same input, so once it has failed for one of them the other cannot succeed; the ladder
+    uses this type to skip it instead of paying for a lost cause.
+    """
