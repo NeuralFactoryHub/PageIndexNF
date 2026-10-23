@@ -421,12 +421,15 @@ def preprocess(
     classify_seconds = time.perf_counter() - started
 
     try:
-        ocr_ordinals = [ordinal for ordinal, _, needs_ocr, _ in classified if needs_ocr]
-        ocr_text = {}
+        needs_ordinals = [o for o, _, needs_ocr, _ in classified if needs_ocr]
+        scan_ordinals = [o for o, _, _, is_scan in classified if is_scan]
+        # Scans are OCR'd too (to score them) even when their own text layer is kept.
+        ocr_ordinals = [o for o, _, needs_ocr, is_scan in classified if needs_ocr or is_scan]
+        ocr_results, vision_text, stats = {}, {}, None
         ocr_seconds = 0.0
         if ocr_ordinals:
             started = time.perf_counter()
-            ocr_text, _, _ = asyncio.run(
+            ocr_results, vision_text, stats = asyncio.run(
                 _ocr_pages(
                     doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency,
                     min_confidence=ocr_min_confidence, vision_model=ocr_vision_model,
@@ -435,35 +438,44 @@ def preprocess(
                 )
             )
             ocr_seconds = time.perf_counter() - started
-            if not ocr_text:
+            if needs_ordinals and not any(o in ocr_results for o in needs_ordinals):
                 raise OCRError(
-                    f"OCR failed on every one of {len(ocr_ordinals)} scanned page(s)",
+                    f"OCR failed on every one of {len(needs_ordinals)} scanned page(s)",
                     doc_name=name,
-                    pages=ocr_ordinals,
+                    pages=needs_ordinals,
                 )
 
         pages = []
         failed = []
         for ordinal, text, needs_ocr, _ in classified:
-            if needs_ocr:
-                if ordinal in ocr_text:
-                    pages.append(ocr_text[ordinal].text)
+            if ordinal in vision_text:
+                pages.append(vision_text[ordinal])
+            elif needs_ocr:
+                if ordinal in ocr_results:
+                    pages.append(ocr_results[ordinal].text)
                 else:
                     pages.append("")
                     failed.append(ordinal)
             else:
-                pages.append(text)
+                pages.append(text)  # scans with a text layer keep it: output unchanged without vision
 
         report = PreprocessReport(
             source_format=source_format,
             page_count=len(pages),
-            text_pages=len(pages) - len(ocr_ordinals),
-            ocr_pages=len(ocr_ordinals) - len(failed),
+            text_pages=len(pages) - len(needs_ordinals),
+            ocr_pages=len(needs_ordinals) - len(failed),
             failed_pages=failed,
             chars_extracted=sum(len(p) for p in pages),
             convert_seconds=convert_seconds,
             classify_seconds=classify_seconds,
             ocr_seconds=ocr_seconds,
+            scan_pages=len(scan_ordinals),
+            low_confidence_pages=stats["low_confidence"] if stats else [],
+            vision_pages=sorted(vision_text),
+            vision_failed_pages=sorted(stats["vision_failed"]) if stats else [],
+            vision_seconds=stats["vision_seconds"] if stats else 0.0,
+            vision_input_tokens=stats["in_tokens"] if stats else 0,
+            vision_output_tokens=stats["out_tokens"] if stats else 0,
         )
         return Normalized(pages=pages, doc_name=name, report=report)
     finally:
