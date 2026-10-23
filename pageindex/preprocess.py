@@ -109,18 +109,7 @@ SUSPICIOUS_CHARS_PER_PAGE = 250
 IMAGE_AREA_RATIO = 0.5
 
 
-def _page_is_image(page, text: str) -> bool:
-    """Decide whether a page needs OCR.
-
-    Character count alone cannot separate "page with 60 characters of real content" from
-    "scanned page with a 60-character DMS footer stamped on top", and the corpus is full of the
-    latter. The second signal — a near-full-page image on a text-poor page — catches it.
-    """
-    chars = len(text.strip())
-    if chars < MIN_CHARS_PER_PAGE:
-        return True
-    if chars >= SUSPICIOUS_CHARS_PER_PAGE:
-        return False
+def _has_full_page_image(page) -> bool:
     page_area = page.get_width() * page.get_height()
     if page_area <= 0:
         return False
@@ -133,8 +122,23 @@ def _page_is_image(page, text: str) -> bool:
     return False
 
 
+def _page_is_image(page, text: str) -> bool:
+    """Decide whether a page needs OCR.
+
+    Character count alone cannot separate "page with 60 characters of real content" from
+    "scanned page with a 60-character DMS footer stamped on top", and the corpus is full of the
+    latter. The second signal — a near-full-page image on a text-poor page — catches it.
+    """
+    chars = len(text.strip())
+    if chars < MIN_CHARS_PER_PAGE:
+        return True
+    if chars >= SUSPICIOUS_CHARS_PER_PAGE:
+        return False
+    return _has_full_page_image(page)
+
+
 def _classify(pdf_bytes: bytes, doc_name: str = None):
-    """Return (pdfium document, [(ordinal, text, needs_ocr), ...]). Ordinals are 1-based.
+    """Return (pdfium document, [(ordinal, text, needs_ocr, is_scan), ...]). Ordinals are 1-based.
 
     The document stays open: OCR renders from it afterwards. Per-page handles are closed as we
     go, because pypdfium2 holds native buffers that Python's GC does not release promptly — and
@@ -157,11 +161,14 @@ def _classify(pdf_bytes: bytes, doc_name: str = None):
         try:
             # get_text_bounded(), not get_text_range(): the latter warns on default params in 4.30.
             text = textpage.get_text_bounded() or ""
+            # Scanners embed their own OCR layer, so a scan must be detected even when it carries
+            # plenty of text: that layer is what the confidence gate has to second-guess.
+            is_scan = _has_full_page_image(page)
             needs_ocr = _page_is_image(page, text)
         finally:
             textpage.close()
             page.close()
-        classified.append((i, text, needs_ocr))
+        classified.append((i, text, needs_ocr, is_scan))
     return doc, classified
 
 
@@ -330,7 +337,7 @@ def preprocess(
     classify_seconds = time.perf_counter() - started
 
     try:
-        ocr_ordinals = [ordinal for ordinal, _, needs_ocr in classified if needs_ocr]
+        ocr_ordinals = [ordinal for ordinal, _, needs_ocr, _ in classified if needs_ocr]
         ocr_text = {}
         ocr_seconds = 0.0
         if ocr_ordinals:
@@ -348,7 +355,7 @@ def preprocess(
 
         pages = []
         failed = []
-        for ordinal, text, needs_ocr in classified:
+        for ordinal, text, needs_ocr, _ in classified:
             if needs_ocr:
                 if ordinal in ocr_text:
                     pages.append(ocr_text[ordinal])
