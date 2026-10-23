@@ -181,6 +181,15 @@ OCR_LANG = "eng"
 OCR_PSM = 1
 OCR_CONCURRENCY = 3
 _OCR_TIMEOUT_SECONDS = 60
+OCR_MIN_CONFIDENCE = 70          # Tesseract mean word confidence (0-100) under which a page is "low confidence"
+OCR_VISION_DPI = 150
+OCR_VISION_MAX_PAGES = 10
+OCR_VISION_MAX_TOKENS = 4096
+OCR_VISION_PROMPT = (
+    "Transcribe faithfully all text on this page, printed and handwritten, in the page's own "
+    "language, preserving line order. Write [illegible] for words you cannot read. Output only "
+    "the page text: no notes, comments or explanations."
+)
 
 
 def _ocr_image(image, lang: str, psm: int) -> str:
@@ -235,6 +244,13 @@ class PreprocessReport:
     convert_seconds: float = 0.0
     classify_seconds: float = 0.0
     ocr_seconds: float = 0.0
+    scan_pages: int = 0
+    low_confidence_pages: list[int] = field(default_factory=list)
+    vision_pages: list[int] = field(default_factory=list)
+    vision_failed_pages: list[int] = field(default_factory=list)
+    vision_seconds: float = 0.0
+    vision_input_tokens: int = 0
+    vision_output_tokens: int = 0
 
 
 @dataclass
@@ -259,6 +275,11 @@ def preprocess(
     ocr_dpi: int = OCR_DPI,
     ocr_psm: int = OCR_PSM,
     ocr_concurrency: int = OCR_CONCURRENCY,
+    ocr_min_confidence: int = OCR_MIN_CONFIDENCE,
+    ocr_vision_model: str | None = None,
+    ocr_vision_dpi: int = OCR_VISION_DPI,
+    ocr_vision_prompt: str | None = None,
+    ocr_vision_max_pages: int = OCR_VISION_MAX_PAGES,
 ) -> Normalized:
     """Normalize any supported document into per-page text.
 
@@ -270,6 +291,12 @@ def preprocess(
     ocr_lang: passed verbatim to Tesseract's -l flag; the matching tesseract-ocr-<lang> pack must
               be installed in the runtime image. A wrong value degrades OCR silently — Tesseract
               returns plausible text in the correct alphabet rather than raising.
+    ocr_min_confidence: Tesseract mean word confidence (0-100) under which a scanned page counts
+              as low confidence (reported; sent to vision when a model is set).
+    ocr_vision_model: litellm model id for the vision fallback; None (default) disables it.
+    ocr_vision_dpi: render resolution for the vision call.
+    ocr_vision_prompt: transcription prompt; None uses OCR_VISION_PROMPT.
+    ocr_vision_max_pages: cap on vision calls per document (cost guard).
 
     Returns Normalized(pages, doc_name, report). `pages` is indexed by source ordinal minus one;
     a page whose OCR failed holds "" and its ordinal is listed in report.failed_pages. Page
