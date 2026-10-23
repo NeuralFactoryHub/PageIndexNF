@@ -377,6 +377,18 @@ raising, degraded straight to `process_no_toc` (skipping the middle strategy), a
 100% — `structure_attempts` recorded all three steps with the expected shape.
 **Status:** DONE.
 
+### 13. OCR quality gate + vision fallback
+**Why:** Tesseract reads handwritten scans poorly (mean word confidence ~60 vs ~85 for print), and
+scanners embed their own text layer, so such pages were never re-checked.
+**What:** scanned pages are detected independently of text-layer length and scored by Tesseract
+(`image_to_data` mean confidence). Pages under `ocr_min_confidence` are reported and, when
+`ocr_vision_model` is set, transcribed by that vision model via litellm (capped by
+`ocr_vision_max_pages`; failures fall back to previous text). Disabled by default; output is
+unchanged without a model. `PreprocessReport` gains scan/low-confidence/vision fields and token
+counts. Measured: a handwritten scanned form is flagged at ~60 and a vision model recovers its
+content; printed scans score >80 and are untouched.
+**Status:** DONE.
+
 ## Config notes (not code changes — for the consumer)
 - Pass `summary_model` as a kwarg to `build_tree` or set it in `pageindex/config.py`
   (`DEFAULT_CONFIG`). On the OSS path the `--summary-model` CLI flag is captured but not wired
