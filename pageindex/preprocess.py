@@ -204,6 +204,7 @@ OCR_VISION_PROMPT = (
 
 @dataclass
 class _OcrResult:
+    """Tesseract output for one page; n_words == -1 means confidence was not computed."""
     text: str
     mean_conf: float   # mean confidence of recognised words, 0-100; 0.0 when n_words == 0
     n_words: int
