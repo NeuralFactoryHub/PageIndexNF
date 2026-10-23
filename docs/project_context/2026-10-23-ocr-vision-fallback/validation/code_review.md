@@ -35,3 +35,12 @@ OK: text priority vision > Tesseract/text layer; OCRError only when every needs_
 
 ## Summary
 Design is implemented faithfully and gate/fallback/concurrency logic is sound. The `image_to_data` text rebuild breaks the byte-identical guarantee for ordinary OCR pages and scoring scans adds Tesseract requirement/cost with vision off; fix those two and genericise plan.md, then re-verify on a scanned-only document.
+
+## Round 2
+
+**Verdict: APPROVED**
+
+- Major 1/2 resolved (code read): `_ocr_image(with_confidence=False)` uses `image_to_string` (preprocess.py:221); `with_confidence=bool(vision_model)` at the call site (:311); `ocr_ordinals` = needs_ocr, plus scans only when `ocr_vision_model` is set (:452-455). With vision off, only needs_ocr pages are OCR'd and no Tesseract requirement is added.
+- Major 3: grep over branch-touched files hits only pre-existing lines (FORK_NOTES.md 10/221-316, preprocess.py 181-185); zero added lines match. Literal "must be empty" fails only because of that old content; this branch's changes are clean. (code_review.md itself quotes the words in Round 1.)
+- F3 minors done: JPEG encode via `asyncio.to_thread` (:262), style fixes. pytest: 18 passed.
+- `uv.lock`: untracked, not part of the fork (pyproject + requirements.txt, no uv); do not commit, delete or gitignore. `.venv` is git-ignored.
