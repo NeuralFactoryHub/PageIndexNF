@@ -199,10 +199,32 @@ OCR_VISION_PROMPT = (
 )
 
 
-def _ocr_image(image, lang: str, psm: int) -> str:
-    return pytesseract.image_to_string(
-        image, lang=lang, config=f"--psm {psm}", timeout=_OCR_TIMEOUT_SECONDS
+@dataclass
+class _OcrResult:
+    text: str
+    mean_conf: float   # mean confidence of recognised words, 0-100; 0.0 when n_words == 0
+    n_words: int
+
+
+def _ocr_image(image, lang: str, psm: int) -> _OcrResult:
+    data = pytesseract.image_to_data(
+        image, lang=lang, config=f"--psm {psm}", timeout=_OCR_TIMEOUT_SECONDS,
+        output_type=pytesseract.Output.DICT,
     )
+    lines: dict[tuple, list[str]] = {}
+    confs: list[float] = []
+    for i, word in enumerate(data["text"]):
+        if not word.strip():
+            continue
+        conf = float(data["conf"][i])
+        if conf < 0:  # -1 marks non-word boxes
+            continue
+        confs.append(conf)
+        key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
+        lines.setdefault(key, []).append(word)
+    text = "\n".join(" ".join(w) for _, w in sorted(lines.items()))
+    mean_conf = sum(confs) / len(confs) if confs else 0.0
+    return _OcrResult(text=text, mean_conf=mean_conf, n_words=len(confs))
 
 
 async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
@@ -358,7 +380,7 @@ def preprocess(
         for ordinal, text, needs_ocr, _ in classified:
             if needs_ocr:
                 if ordinal in ocr_text:
-                    pages.append(ocr_text[ordinal])
+                    pages.append(ocr_text[ordinal].text)
                 else:
                     pages.append("")
                     failed.append(ordinal)
