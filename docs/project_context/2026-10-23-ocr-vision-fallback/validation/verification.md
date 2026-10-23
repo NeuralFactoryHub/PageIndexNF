@@ -13,3 +13,7 @@ Model: bedrock/eu.anthropic.claude-haiku-5-5, ocr_lang=ita. Fixtures not committ
 | pytest | 18 passed |
 
 Note: vision output is nondeterministic ("4MT" vs "4 MT" across runs).
+
+## Fix 1 identity check (vision off)
+
+`preprocess(..., ocr_lang="ita")` dumped at `origin/feature/customizations` (baseline worktree) and at HEAD: pages identical for both fixtures (4-page form: 4/4; 40-page printed doc: 40/40). With a vision model set, OCR text layout of `needs_ocr` pages may differ slightly (rebuilt from `image_to_data`).

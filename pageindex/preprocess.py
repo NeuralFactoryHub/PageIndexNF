@@ -8,6 +8,8 @@ This library never installs system binaries — it asserts them. See the README 
 Dockerfile lines the consumer must provide.
 """
 import asyncio
+import base64
+import io
 import logging
 import os
 import shutil
@@ -188,7 +190,8 @@ OCR_LANG = "eng"
 OCR_PSM = 1
 OCR_CONCURRENCY = 3
 _OCR_TIMEOUT_SECONDS = 60
-OCR_MIN_CONFIDENCE = 70          # Tesseract mean word confidence (0-100) under which a page is "low confidence"
+# Tesseract mean word confidence (0-100) under which a page is "low confidence"
+OCR_MIN_CONFIDENCE = 70
 OCR_VISION_DPI = 150
 OCR_VISION_MAX_PAGES = 10
 OCR_VISION_MAX_TOKENS = 4096
@@ -206,7 +209,19 @@ class _OcrResult:
     n_words: int
 
 
-def _ocr_image(image, lang: str, psm: int) -> _OcrResult:
+def _ocr_image(image, lang: str, psm: int, *, with_confidence: bool = False) -> _OcrResult:
+    """Run Tesseract on one image.
+
+    with_confidence=False is the historical path (`image_to_string`, text byte-identical to
+    before; mean_conf=100.0, n_words=-1 = unknown). with_confidence=True uses `image_to_data`
+    for scoring and rebuilds the text (lines per `\\n`, blank line between paragraphs/blocks);
+    its whitespace may differ slightly from `image_to_string`.
+    """
+    if not with_confidence:
+        text = pytesseract.image_to_string(
+            image, lang=lang, config=f"--psm {psm}", timeout=_OCR_TIMEOUT_SECONDS
+        )
+        return _OcrResult(text=text, mean_conf=100.0, n_words=-1)
     data = pytesseract.image_to_data(
         image, lang=lang, config=f"--psm {psm}", timeout=_OCR_TIMEOUT_SECONDS,
         output_type=pytesseract.Output.DICT,
@@ -222,14 +237,19 @@ def _ocr_image(image, lang: str, psm: int) -> _OcrResult:
         confs.append(conf)
         key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
         lines.setdefault(key, []).append(word)
-    text = "\n".join(" ".join(w) for _, w in sorted(lines.items()))
+    out: list[str] = []
+    prev = None
+    for key, words in sorted(lines.items()):
+        if prev is not None and key[:2] != prev[:2]:
+            out.append("")
+        out.append(" ".join(words))
+        prev = key
+    text = "\n".join(out)
     mean_conf = sum(confs) / len(confs) if confs else 0.0
     return _OcrResult(text=text, mean_conf=mean_conf, n_words=len(confs))
 
 
 def _image_to_data_url(image, quality: int = 85) -> str:
-    import base64
-    import io
     buf = io.BytesIO()
     image.convert("RGB").save(buf, format="JPEG", quality=quality)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -238,10 +258,11 @@ def _image_to_data_url(image, quality: int = 85) -> str:
 async def _vision_transcribe(image, model: str, prompt: str) -> tuple[str, int, int]:
     """Return (text, input_tokens, output_tokens). Raises on any failure; caller decides."""
     import litellm
+    data_url = await asyncio.to_thread(_image_to_data_url, image)
     resp = await litellm.acompletion(
         model=model,
         messages=[{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": _image_to_data_url(image)}},
+            {"type": "image_url", "image_url": {"url": data_url}},
             {"type": "text", "text": prompt},
         ]}],
         max_tokens=OCR_VISION_MAX_TOKENS,
@@ -285,7 +306,9 @@ async def _ocr_pages(
                 # 150 DPI). This bounds it to `concurrency` images. Rendering blocks the loop for
                 # ~0.042s, which is why it can stay here.
                 image = doc[ordinal - 1].render(scale=dpi / 72).to_pil()
-                results[ordinal] = await asyncio.to_thread(_ocr_image, image, lang, psm)
+                results[ordinal] = await asyncio.to_thread(
+                    _ocr_image, image, lang, psm, with_confidence=bool(vision_model)
+                )
                 res = results[ordinal]
                 if res.n_words == 0 or res.mean_conf >= min_confidence:
                     return
@@ -423,8 +446,12 @@ def preprocess(
     try:
         needs_ordinals = [o for o, _, needs_ocr, _ in classified if needs_ocr]
         scan_ordinals = [o for o, _, _, is_scan in classified if is_scan]
-        # Scans are OCR'd too (to score them) even when their own text layer is kept.
-        ocr_ordinals = [o for o, _, needs_ocr, is_scan in classified if needs_ocr or is_scan]
+        # Scans are OCR'd too (to score them) only when a vision model is set: without one the
+        # path is exactly the historical needs_ocr-only one (no Tesseract requirement or cost).
+        ocr_ordinals = [
+            o for o, _, needs_ocr, is_scan in classified
+            if needs_ocr or (is_scan and ocr_vision_model)
+        ]
         ocr_results, vision_text, stats = {}, {}, None
         ocr_seconds = 0.0
         if ocr_ordinals:
