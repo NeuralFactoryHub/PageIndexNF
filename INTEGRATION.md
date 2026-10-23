@@ -67,7 +67,10 @@ catalog, a snippet store or a full-text search can reuse it without parsing the 
 | `ocr_vision_prompt` | Transcription prompt; `None` uses the built-in one. |
 | `ocr_vision_max_pages` | Cap on vision calls per document (cost guard). Default 10. |
 
-Every scanned page is scored by Tesseract, even when it carries an embedded text layer. A page
+With `ocr_vision_model=None` (default) behaviour and cost are unchanged: only pages without a usable
+text layer are OCR'd, `low_confidence_pages` stays empty. With a model set, every scanned page is
+scored by Tesseract, even when it carries an embedded text layer (OCR text layout of image-only
+pages may then differ slightly in whitespace). A page
 with recognised words and confidence under `ocr_min_confidence` is reported in
 `low_confidence_pages` and, when a vision model is set, replaced by the model's transcription
 (useful for handwritten scans, which Tesseract reads poorly). Blank pages never trigger vision.
@@ -97,6 +100,8 @@ convert_seconds  classify_seconds  ocr_seconds
 scan_pages  low_confidence_pages  vision_pages  vision_failed_pages
 vision_seconds  vision_input_tokens  vision_output_tokens
 ```
+
+`scan_pages` counts every full-page-image page, blank ones included.
 
 `failed_pages` non-empty means the tree was built with holes in it. Nothing raises. Decide
 whether that is acceptable for your use case, and surface it if it is not.

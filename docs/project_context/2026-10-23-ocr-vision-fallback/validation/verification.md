@@ -5,7 +5,7 @@ Model: bedrock/eu.anthropic.claude-haiku-5-5, ocr_lang=ita. Fixtures not committ
 | Check | Result |
 |---|---|
 | scanned form, vision on | vision_pages=[3], low_confidence_pages=[3], vision_failed=[], vision 7.5s, 2915 in / 839 out tokens |
-| p3 keywords | BLOCCO B2, 4 MT, RICARICA LITIO, INTERFERENZIALI all found; no "Nota"/"Note:" trailer added (the page's own printed "NOTE" heading is source text) |
+| p3 keywords | the 4 reference phrases supplied by the consumer all found; no "Nota"/"Note:" trailer added (the page's own printed "NOTE" heading is source text) |
 | blank p4 | "" and not in low_confidence_pages |
 | p1-p2 | unchanged text layer |
 | printed 40-page doc | vision_pages=[], low_confidence_pages=[]; runtime 1.4s vs 1.5s vision off (delta ~0) |

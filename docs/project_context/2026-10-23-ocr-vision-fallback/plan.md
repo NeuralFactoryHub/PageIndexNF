@@ -17,7 +17,7 @@
 - AC-6 `python -m pytest -q` still passes.
 
 Verification fixtures (NOT committed, client documents):
-`/private/tmp/claude-501/-Users-juanandresgussalli-CursorProjects-jungheinrich-jungheinrich-02-docriassuntivotecnici-backend/04d5b2c8-fcd1-4f0a-a45d-b60631336f44/scratchpad/spike/input/sopralluogo.pdf` (p3 handwritten, p4 blank, p1-2 printed scan) and `.../input/duvri_cm.pdf` (40 printed pages, p35 scanned). Reference spike script for the vision call: `.../spike/run_spike4.py`.
+"form" = handwritten scanned form (4 pages: 2 printed scans, 1 handwritten, 1 blank); "printed doc" = 40-page printed document with one scanned page. Both are provided by the consumer at verification time (not in this repo). Reference spike script for the vision call: a consumer-side spike script.
 
 Commit after each task with a conventional message (no push — the developer pushes).
 
@@ -91,7 +91,7 @@ def _has_full_page_image(page) -> bool:
 ```
 Comment why: scanners embed their own OCR layer; a scan must be scored even when it carries text.
 
-**Step 3 Verify:** quick script on `sopralluogo.pdf`: p1-p3 `is_scan=True, needs_ocr=False`; p4 `needs_ocr=True`. On `duvri_cm.pdf`: born-digital pages `is_scan=False`. Commit: `feat(preprocess): detect scanned pages independently of text-layer length`.
+**Step 3 Verify:** quick script on the form: p1-p3 `is_scan=True, needs_ocr=False`; p4 `needs_ocr=True`. On the printed doc: born-digital pages `is_scan=False`. Commit: `feat(preprocess): detect scanned pages independently of text-layer length`.
 
 ---
 
@@ -129,7 +129,7 @@ def _ocr_image(image, lang: str, psm: int) -> _OcrResult:
     return _OcrResult(text=text, mean_conf=mean_conf, n_words=len(confs))
 ```
 
-**Step 2 Verify:** on `sopralluogo.pdf` p3 at 150 DPI, lang `ita`: `mean_conf` ≈ 60, `n_words` ≈ 218; p1 ≈ 86; p4 `n_words == 0`. On `duvri_cm.pdf` p35 ≈ 83. Commit: `feat(preprocess): tesseract returns word confidence`.
+**Step 2 Verify:** on the form p3 at 150 DPI, lang `ita`: `mean_conf` ≈ 60, `n_words` ≈ 218; p1 ≈ 86; p4 `n_words == 0`. On the printed doc p35 ≈ 83. Commit: `feat(preprocess): tesseract returns word confidence`.
 
 ---
 
@@ -217,7 +217,7 @@ Keep pdfium rendering on the loop thread (existing comment explains why). The `v
 
 **Step 3** Fill the report: `scan_pages`, `low_confidence_pages`, `vision_pages=sorted(vision_text)`, `vision_failed_pages`, `vision_seconds`, token counters. `ocr_pages`/`text_pages` semantics unchanged (count `needs_ocr` pages only).
 
-**Step 4 Verify:** run `preprocess(sopralluogo_bytes, filename="sopralluogo.pdf", ocr_lang="ita")` (vision off): `pages` identical to current `feature/customizations` output for all 4 pages (diff against a dump taken before Task 2), `report.scan_pages == 3`, `report.low_confidence_pages == [3]`. Commit: `feat(preprocess): report scan/low-confidence/vision pages`.
+**Step 4 Verify:** run `preprocess(form_bytes, filename="form.pdf", ocr_lang="ita")` (vision off): `pages` identical to current `feature/customizations` output for all 4 pages (diff against a dump taken before Task 2), `report.scan_pages == 3`, `report.low_confidence_pages == [3]`. Commit: `feat(preprocess): report scan/low-confidence/vision pages`.
 
 ---
 
@@ -233,9 +233,9 @@ Commit: `docs: document OCR confidence gate and vision fallback`.
 
 ### Task 7: end-to-end verification — covers AC-1..AC-6
 
-**Step 1** Script (not committed, in the scratch dir) running `preprocess` with `ocr_vision_model="bedrock/eu.anthropic.claude-haiku-5-5"`, `ocr_lang="ita"`, AWS creds from the consumer backend `.env` (`/Users/juanandresgussalli/CursorProjects/jungheinrich/jh-prmocr/backend/.env`), on both fixtures. Expected:
-- `sopralluogo.pdf`: `vision_pages == [3]`, page 3 text contains `BLOCCO B2`, `4 MT` (or `4MT`), `RICARICA LITIO`, `INTERFERENZIALI`; no "Nota"/"Note:" trailer added by the model; p4 → `""`, not in `low_confidence_pages`; p1-p2 unchanged text layer.
-- `duvri_cm.pdf`: `vision_pages == []`, `low_confidence_pages == []`, total runtime within +5 s of the pre-change run.
+**Step 1** Script (not committed, in the scratch dir) running `preprocess` with `ocr_vision_model="bedrock/eu.anthropic.claude-haiku-5-5"`, `ocr_lang="ita"`, AWS creds from the consumer backend `.env` (the consumer backend `.env`), on both fixtures. Expected:
+- the form: `vision_pages == [3]`, page 3 text contains the 4 reference phrases supplied by the consumer; no "Nota"/"Note:" trailer added by the model; p4 → `""`, not in `low_confidence_pages`; p1-p2 unchanged text layer.
+- the printed doc: `vision_pages == []`, `low_confidence_pages == []`, total runtime within +5 s of the pre-change run.
 - `python -m pytest -q` → all pass.
 
 **Step 2** Paste the numbers into `docs/project_context/2026-10-23-ocr-vision-fallback/validation/verification.md`. Commit: `docs(ocr): verification run`.
