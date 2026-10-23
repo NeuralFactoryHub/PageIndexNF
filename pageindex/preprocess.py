@@ -227,8 +227,42 @@ def _ocr_image(image, lang: str, psm: int) -> _OcrResult:
     return _OcrResult(text=text, mean_conf=mean_conf, n_words=len(confs))
 
 
-async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
-    """OCR the given ordinals concurrently. Returns {ordinal: text} for successes only.
+def _image_to_data_url(image, quality: int = 85) -> str:
+    import base64
+    import io
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="JPEG", quality=quality)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+async def _vision_transcribe(image, model: str, prompt: str) -> tuple[str, int, int]:
+    """Return (text, input_tokens, output_tokens). Raises on any failure; caller decides."""
+    import litellm
+    resp = await litellm.acompletion(
+        model=model,
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": _image_to_data_url(image)}},
+            {"type": "text", "text": prompt},
+        ]}],
+        max_tokens=OCR_VISION_MAX_TOKENS,
+        # no temperature: some providers (Claude 5.x on Bedrock Converse) reject it
+    )
+    usage = getattr(resp, "usage", None)
+    return (
+        resp.choices[0].message.content or "",
+        int(getattr(usage, "prompt_tokens", 0) or 0),
+        int(getattr(usage, "completion_tokens", 0) or 0),
+    )
+
+
+async def _ocr_pages(
+    doc, ordinals, dpi, lang, psm, concurrency, *,
+    min_confidence, vision_model, vision_dpi, vision_prompt, vision_max_pages,
+):
+    """OCR the given ordinals concurrently.
+
+    Returns (results {ordinal: _OcrResult}, vision {ordinal: text}, stats). Failures are omitted.
+    Pages with words but mean confidence under `min_confidence` go to the vision model when set.
 
     Rendering stays on the event-loop thread and ONLY Tesseract is dispatched to threads.
     pdfium is a C library that is not thread-safe: touching a PdfDocument from a thread other
@@ -239,6 +273,9 @@ async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
     _require_tesseract()
     semaphore = asyncio.Semaphore(concurrency)
     results = {}
+    vision = {}
+    stats = {"low_confidence": [], "vision_failed": [], "vision_seconds": 0.0,
+             "in_tokens": 0, "out_tokens": 0}
 
     async def run(ordinal):
         async with semaphore:
@@ -249,6 +286,30 @@ async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
                 # ~0.042s, which is why it can stay here.
                 image = doc[ordinal - 1].render(scale=dpi / 72).to_pil()
                 results[ordinal] = await asyncio.to_thread(_ocr_image, image, lang, psm)
+                res = results[ordinal]
+                if res.n_words == 0 or res.mean_conf >= min_confidence:
+                    return
+                stats["low_confidence"].append(ordinal)
+                # Cap check is racy by at most `concurrency` pages; acceptable for a cost guard.
+                if not vision_model or len(vision) + len(stats["vision_failed"]) >= vision_max_pages:
+                    return
+                try:
+                    if vision_dpi != dpi:
+                        image = doc[ordinal - 1].render(scale=vision_dpi / 72).to_pil()
+                    t0 = time.perf_counter()
+                    text, tin, tout = await _vision_transcribe(
+                        image, vision_model, vision_prompt or OCR_VISION_PROMPT
+                    )
+                    stats["vision_seconds"] += time.perf_counter() - t0
+                    stats["in_tokens"] += tin
+                    stats["out_tokens"] += tout
+                    if text.strip():
+                        vision[ordinal] = text
+                    else:
+                        stats["vision_failed"].append(ordinal)
+                except Exception as e:
+                    stats["vision_failed"].append(ordinal)
+                    logging.warning(f"Vision transcription failed on page {ordinal}: {e}", exc_info=True)
             except Exception as e:
                 # Broad on purpose: one page must never take the document down — covers both
                 # render failures (pdfium) and OCR failures (tesseract). exc_info keeps the
@@ -256,7 +317,8 @@ async def _ocr_pages(doc, ordinals, dpi, lang, psm, concurrency):
                 logging.warning(f"Render/OCR failed on page {ordinal}: {e}", exc_info=True)
 
     await asyncio.gather(*(run(o) for o in ordinals))
-    return results
+    stats["low_confidence"].sort()
+    return results, vision, stats
 
 
 @dataclass
@@ -364,8 +426,13 @@ def preprocess(
         ocr_seconds = 0.0
         if ocr_ordinals:
             started = time.perf_counter()
-            ocr_text = asyncio.run(
-                _ocr_pages(doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency)
+            ocr_text, _, _ = asyncio.run(
+                _ocr_pages(
+                    doc, ocr_ordinals, ocr_dpi, ocr_lang, ocr_psm, ocr_concurrency,
+                    min_confidence=ocr_min_confidence, vision_model=ocr_vision_model,
+                    vision_dpi=ocr_vision_dpi, vision_prompt=ocr_vision_prompt,
+                    vision_max_pages=ocr_vision_max_pages,
+                )
             )
             ocr_seconds = time.perf_counter() - started
             if not ocr_text:
